@@ -70,7 +70,7 @@ enum BackgroundEvent {
 
 pub struct AppState {
     pub spatial_index: HashMap<(i32, i32), usize>,
-    pub critical_chunks: usize,
+    pub high_score_chunks: usize,
     pub table_scroll: usize,
     pub page_size: usize,
     pub help_visible: bool,
@@ -155,7 +155,7 @@ impl AppState {
             .enumerate()
             .map(|(i, c)| ((c.chunk_x, c.chunk_z), i))
             .collect();
-        let critical_chunks = scan.chunks.iter().filter(|c| c.score >= 80.0).count();
+        let high_score_chunks = scan.chunks.iter().filter(|c| c.score >= 80.0).count();
 
         let initial_tab = if chunk_count > 0 {
             Tab::Hotspots
@@ -165,7 +165,7 @@ impl AppState {
 
         Self {
             spatial_index,
-            critical_chunks,
+            high_score_chunks,
             table_scroll: 0,
             page_size: 20,
             help_visible: false,

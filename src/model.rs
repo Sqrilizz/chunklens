@@ -104,11 +104,11 @@ impl ChunkMetrics {
             return "LARGE NBT";
         }
         match self.score {
-            s if s >= 80.0 => "CRITICAL",
-            s if s >= 60.0 => "HIGH",
-            s if s >= 40.0 => "ELEVATED",
-            s if s >= 20.0 => "NORMAL",
-            _ => "LOW",
+            s if s >= 80.0 => "SCORE 80+",
+            s if s >= 60.0 => "SCORE 60+",
+            s if s >= 40.0 => "SCORE 40+",
+            s if s >= 20.0 => "SCORE 20+",
+            _ => "SCORE <20",
         }
     }
 
@@ -117,11 +117,11 @@ impl ChunkMetrics {
             return "\x1b[1;95mLARGE NBT\x1b[0m".to_string();
         }
         match self.score {
-            s if s >= 80.0 => "\x1b[1;91mCRITICAL\x1b[0m".to_string(),
-            s if s >= 60.0 => "\x1b[1;93mHIGH\x1b[0m".to_string(),
-            s if s >= 40.0 => "\x1b[93mELEVATED\x1b[0m".to_string(),
-            s if s >= 20.0 => "\x1b[92mNORMAL\x1b[0m".to_string(),
-            _ => "\x1b[90mLOW\x1b[0m".to_string(),
+            s if s >= 80.0 => "\x1b[1;91mSCORE 80+\x1b[0m".to_string(),
+            s if s >= 60.0 => "\x1b[1;93mSCORE 60+\x1b[0m".to_string(),
+            s if s >= 40.0 => "\x1b[93mSCORE 40+\x1b[0m".to_string(),
+            s if s >= 20.0 => "\x1b[92mSCORE 20+\x1b[0m".to_string(),
+            _ => "\x1b[90mSCORE <20\x1b[0m".to_string(),
         }
     }
 

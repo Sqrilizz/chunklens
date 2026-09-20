@@ -389,7 +389,7 @@ fn render_hotspots(frame: &mut Frame, state: &mut AppState, area: Rect) {
         "Chunk X, Z",
         "Block X, Z",
         "Score",
-        "Severity",
+        "Band",
         "Entities",
         "Hoppers",
         "Redstone",
@@ -441,9 +441,9 @@ fn render_hotspots(frame: &mut Frame, state: &mut AppState, area: Rect) {
         })
         .collect();
     let title = format!(
-        " Chunks · {} matches · {} critical · Potential Load Score ",
+        " Chunks · {} matches · {} at 80+ · Potential Load Score ",
         state.filtered_chunk_indices.len(),
-        state.critical_chunks
+        state.high_score_chunks
     );
     let table = Table::new(
         rows,
