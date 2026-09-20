@@ -1,0 +1,11 @@
+/target/
+/world/
+/*.tar.zst
+/*-report.json
+/*-report.json.gz
+/*-report.csv
+/*-report.csv.gz
+/remote_configs/
+/remote_configs_backup_original/
+/benchmarks/local/
+/live-spark*.json
