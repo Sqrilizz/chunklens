@@ -586,7 +586,8 @@ pub fn metric_value(chunk: &ChunkMetrics, category: &str) -> f64 {
         "items" => chunk.stored_items as f64,
         "entities" => chunk.entity_count as f64,
         "villagers" => chunk.villagers as f64,
-        "hoppers" => chunk.hoppers as f64,
+        "hoppers" => (chunk.hoppers + chunk.hopper_minecarts) as f64,
+        "stands" | "armor_stands" => chunk.armor_stands as f64,
         "minecarts" => chunk.minecarts as f64,
         "redstone" => {
             (chunk.redstone_wire

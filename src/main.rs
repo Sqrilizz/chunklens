@@ -60,6 +60,10 @@ struct Cli {
     #[arg(short = 'b', long)]
     bloat: bool,
 
+    /// Sort chunks by category (score, villagers, hoppers, stands, entities, bloat, redstone, chests, shulkers)
+    #[arg(short = 's', long, value_name = "CATEGORY")]
+    sort: Option<String>,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -127,6 +131,9 @@ enum Command {
         /// Inspect NBT size, oversized chunks (>1MB), and dense storage
         #[arg(short = 'b', long)]
         bloat: bool,
+        /// Sort chunks by category (score, villagers, hoppers, stands, entities, bloat, redstone, chests, shulkers)
+        #[arg(short = 's', long, value_name = "CATEGORY")]
+        sort: Option<String>,
     },
     /// Load an existing JSON report for instant offline analysis without rescanning
     Load {
@@ -136,6 +143,9 @@ enum Command {
         /// Inspect NBT size, oversized chunks (>1MB), and dense storage
         #[arg(short = 'b', long)]
         bloat: bool,
+        /// Sort chunks by category (score, villagers, hoppers, stands, entities, bloat, redstone, chests, shulkers)
+        #[arg(short = 's', long, value_name = "CATEGORY")]
+        sort: Option<String>,
     },
     /// Discover installed Minecraft servers
     Servers,
@@ -160,9 +170,10 @@ fn main() -> Result<()> {
                 csv,
                 top,
                 bloat,
+                sort,
             } => {
                 let options = analysis::ScanOptions::new(threads, fast, eco, min_score);
-                run_scan(world, options, json, csv, top, bloat)?;
+                run_scan(world, options, json, csv, top, bloat, sort.as_deref())?;
             }
             Command::Tui {
                 target,
@@ -250,9 +261,14 @@ fn main() -> Result<()> {
                 let summary = protocol::spark::parse_spark_report(&report)?;
                 print_spark_summary(&summary);
             }
-            Command::Load { report, top, bloat } => {
+            Command::Load {
+                report,
+                top,
+                bloat,
+                sort,
+            } => {
                 let result = ScanResult::read_json(&report)?;
-                print_scan(&result, top, bloat);
+                print_scan(&result, top, bloat, sort.as_deref());
             }
             Command::Servers => interactive_discovery()?,
         }
@@ -269,6 +285,7 @@ fn main() -> Result<()> {
             cli.csv,
             cli.top,
             cli.bloat,
+            cli.sort.as_deref(),
         )?;
         return Ok(());
     }
@@ -284,6 +301,7 @@ fn main() -> Result<()> {
             cli.csv,
             cli.top,
             cli.bloat,
+            cli.sort.as_deref(),
         )?;
         return Ok(());
     } else if cwd_region.is_dir() {
@@ -294,6 +312,7 @@ fn main() -> Result<()> {
             cli.csv,
             cli.top,
             cli.bloat,
+            cli.sort.as_deref(),
         )?;
         return Ok(());
     }
@@ -309,10 +328,11 @@ fn run_scan(
     csv: Option<PathBuf>,
     top: usize,
     bloat: bool,
+    sort: Option<&str>,
 ) -> Result<()> {
     let min_score = options.min_score;
     let result = analysis::scan_world(&world, options)?;
-    print_scan(&result, top, bloat);
+    print_scan(&result, top, bloat, sort);
     if let Some(path) = json {
         result.write_json(&path, min_score)?;
         println!(
@@ -645,8 +665,14 @@ fn print_servers(servers: &[Server]) {
     }
 }
 
-pub fn print_scan(result: &ScanResult, count: usize, bloat_only: bool) {
-    if bloat_only {
+pub fn print_scan(result: &ScanResult, count: usize, bloat_only: bool, sort: Option<&str>) {
+    let category = match sort {
+        Some(s) if !s.is_empty() => s,
+        _ if bloat_only => "bloat",
+        _ => "score",
+    };
+
+    if category == "bloat" {
         let bloat_chunks = result.top_by("bloat", count);
         if bloat_chunks.is_empty() {
             println!(
@@ -687,6 +713,63 @@ pub fn print_scan(result: &ScanResult, count: usize, bloat_only: bool) {
                 size_str,
                 metric.tp_command(),
                 metric.bloat_details()
+            );
+        }
+        println!(
+            "  \x1b[90m────────────────────────────────────────────────────────────────────────────────────────\x1b[0m\n"
+        );
+        return;
+    }
+
+    if category != "score" {
+        let top_chunks = result.top_by(category, count);
+        if top_chunks.is_empty() {
+            println!(
+                "\n  \x1b[1;92m✔\x1b[0m No chunks found for category '{}'.\n",
+                category
+            );
+            return;
+        }
+
+        let cat_label = category.to_ascii_uppercase();
+        println!(
+            "\n  \x1b[1;37mTOP CHUNKS RANKED BY {cat_label}\x1b[0m \x1b[90m(Ranked by {category} metric)\x1b[0m"
+        );
+        println!(
+            "  \x1b[90m────────────────────────────────────────────────────────────────────────────────────────\x1b[0m"
+        );
+        println!("  \x1b[90m #   Value     Teleport Command       Culprits & Details\x1b[0m");
+        println!(
+            "  \x1b[90m────────────────────────────────────────────────────────────────────────────────────────\x1b[0m"
+        );
+
+        for (index, metric) in top_chunks.iter().enumerate() {
+            let val_str = match category {
+                "villagers" => format!("{:>5} vil", metric.villagers),
+                "hoppers" => format!("{:>5} hop", metric.hoppers + metric.hopper_minecarts),
+                "stands" | "armor_stands" => format!("{:>5} std", metric.armor_stands),
+                "entities" => format!("{:>5} ent", metric.entity_count),
+                "shulkers" => format!("{:>5} shk", metric.shulkers),
+                "chests" => format!("{:>5} chs", metric.chests),
+                "items" => format!("{:>5} itm", metric.stored_items),
+                "size" | "nbt" => format!("{:>5} KiB", metric.payload_size / 1024),
+                "redstone" => {
+                    let red = metric.redstone_wire
+                        + metric.repeaters
+                        + metric.comparators
+                        + metric.observers
+                        + metric.pistons;
+                    format!("{:>5} red", red)
+                }
+                _ => format!("{:>7.1}", model::metric_value(metric, category)),
+            };
+
+            println!(
+                "  \x1b[90m{:>2}\x1b[0m   \x1b[1;38;2;245;158;11m{}\x1b[0m   \x1b[1;96m{:<22}\x1b[0m {}",
+                index + 1,
+                val_str,
+                metric.tp_command(),
+                metric.culprits_summary()
             );
         }
         println!(

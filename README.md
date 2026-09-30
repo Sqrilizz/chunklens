@@ -69,6 +69,9 @@ chunklens scan /path/to/world --eco --min-score 20.0 -n 10
 
 # Inspect NBT bloat and oversized storage stashes
 chunklens scan /path/to/world --bloat -n 20
+
+# Rank chunks by specific category (villagers, hoppers, stands, entities, redstone, chests, shulkers)
+chunklens scan /path/to/world --sort villagers -n 15
 ```
 
 ### Offline Report Analysis
@@ -76,6 +79,9 @@ chunklens scan /path/to/world --bloat -n 20
 ```bash
 # Inspect a saved report without re-reading the world
 chunklens load report.json.gz -n 20
+
+# Rank saved report by category
+chunklens load report.json.gz --sort hoppers -n 10
 
 # Launch interactive fullscreen TUI
 chunklens tui report.json.gz

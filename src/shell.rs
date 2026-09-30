@@ -349,7 +349,7 @@ pub fn run(server: Server, worlds: Vec<World>) -> Result<()> {
                                 &world.path,
                                 ScanOptions::new(threads, fast, eco, min_score),
                             )?;
-                            crate::print_scan(&res, 10, false);
+                            crate::print_scan(&res, 10, false, None);
                             result = Some(res);
                         } else {
                             println!("  ✖ Select a world first using 'use <world>'");
@@ -364,12 +364,12 @@ pub fn run(server: Server, worlds: Vec<World>) -> Result<()> {
                                 .unwrap_or("score");
                             let count = args.iter().find_map(|v| v.parse().ok()).unwrap_or(10);
                             if category == "score" {
-                                crate::print_scan(r, count, false);
+                                crate::print_scan(r, count, false, None);
                             } else if category == "bloat" || category == "nbt" || category == "size"
                             {
-                                crate::print_scan(r, count, true);
+                                crate::print_scan(r, count, true, None);
                             } else {
-                                print_top(r, category, count);
+                                crate::print_scan(r, count, false, Some(category));
                             }
                         }
                         None => println!("  ✖ Run 'scan' first to populate data."),
@@ -377,7 +377,7 @@ pub fn run(server: Server, worlds: Vec<World>) -> Result<()> {
                     ["bloat", args @ ..] => match &result {
                         Some(r) => {
                             let count = args.iter().find_map(|v| v.parse().ok()).unwrap_or(10);
-                            crate::print_scan(r, count, true);
+                            crate::print_scan(r, count, true, None);
                         }
                         None => println!("  ✖ Run 'scan' first to populate data."),
                     },
@@ -495,30 +495,6 @@ pub fn run(server: Server, worlds: Vec<World>) -> Result<()> {
             Err(error) => return Err(error.into()),
         }
     }
-}
-
-fn print_top(result: &ScanResult, category: &str, count: usize) {
-    println!(
-        "\n  \x1b[1;38;2;241;245;249mTOP CHUNKS BY {}\x1b[0m\n",
-        category.to_ascii_uppercase()
-    );
-    for (i, c) in result.top_by(category, count).iter().enumerate() {
-        println!(
-            "  \x1b[38;2;129;140;248m#{:<2}\x1b[0m Chunk ({:>5}, {:>5}) ➔ Block [{:>7}, {:>7}]  Score: {:>5.1} ({})  Ent:{} Vil:{} Hop:{}  |  \x1b[38;2;56;189;248m{}\x1b[0m",
-            i + 1,
-            c.chunk_x,
-            c.chunk_z,
-            c.block_x(),
-            c.block_z(),
-            c.score,
-            c.severity_colored(),
-            c.entity_count,
-            c.villagers,
-            c.hoppers,
-            c.tp_command()
-        );
-    }
-    println!();
 }
 
 fn inspect(c: &ChunkMetrics) {
