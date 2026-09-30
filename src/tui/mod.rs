@@ -138,7 +138,7 @@ fn handle_key(state: &mut AppState, code: KeyCode, modifiers: KeyModifiers) {
             }
             KeyCode::Esc => {
                 if state.rcon_input.is_empty() {
-                    state.set_tab(Tab::Monitor);
+                    state.set_tab(Tab::Hotspots);
                 } else {
                     state.rcon_input.clear();
                 }
@@ -154,8 +154,15 @@ fn handle_key(state: &mut AppState, code: KeyCode, modifiers: KeyModifiers) {
 
     // Standard Navigation
     match code {
-        KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => {
+        KeyCode::Char('q') | KeyCode::Char('Q') => {
             state.should_quit = true;
+        }
+        KeyCode::Esc => {
+            if state.active_tab != Tab::Hotspots {
+                state.set_tab(Tab::Hotspots);
+            } else {
+                state.should_quit = true;
+            }
         }
         KeyCode::Tab => {
             state.next_tab();
@@ -163,13 +170,13 @@ fn handle_key(state: &mut AppState, code: KeyCode, modifiers: KeyModifiers) {
         KeyCode::BackTab => {
             state.prev_tab();
         }
-        KeyCode::Char('1') => state.set_tab(Tab::Monitor),
-        KeyCode::Char('2') => state.set_tab(Tab::Hotspots),
-        KeyCode::Char('3') => state.set_tab(Tab::Heatmap),
-        KeyCode::Char('4') => state.set_tab(Tab::Clusters),
-        KeyCode::Char('5') => state.set_tab(Tab::Diagnostic),
-        KeyCode::Char('6') => state.set_tab(Tab::Spark),
-        KeyCode::Char('7') => state.set_tab(Tab::Rcon),
+        KeyCode::Char('1') => state.set_tab(Tab::Hotspots),
+        KeyCode::Char('2') => state.set_tab(Tab::Clusters),
+        KeyCode::Char('3') => state.set_tab(Tab::Monitor),
+        KeyCode::Char('4') => state.set_tab(Tab::Rcon),
+        KeyCode::Char('h' | 'H') if state.active_tab != Tab::Heatmap => state.set_tab(Tab::Heatmap),
+        KeyCode::Char('s' | 'S') => state.set_tab(Tab::Spark),
+        KeyCode::Char('d' | 'D') => state.set_tab(Tab::Diagnostic),
 
         // Table & list navigation
         KeyCode::Down | KeyCode::Char('j') => match state.active_tab {
@@ -231,5 +238,47 @@ fn handle_key(state: &mut AppState, code: KeyCode, modifiers: KeyModifiers) {
         }
 
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn primary_navigation_and_detail_shortcuts() {
+        let mut state = AppState::new(ScanResult::default(), None, None, None, None);
+        let press = |state: &mut AppState, code| handle_key(state, code, KeyModifiers::NONE);
+
+        press(&mut state, KeyCode::Char('1'));
+        assert_eq!(state.active_tab, Tab::Hotspots);
+        press(&mut state, KeyCode::Tab);
+        assert_eq!(state.active_tab, Tab::Clusters);
+        press(&mut state, KeyCode::Tab);
+        assert_eq!(state.active_tab, Tab::Monitor);
+        press(&mut state, KeyCode::Tab);
+        assert_eq!(state.active_tab, Tab::Rcon);
+        press(&mut state, KeyCode::Tab);
+        assert_eq!(state.active_tab, Tab::Hotspots);
+
+        for (key, tab) in [
+            ('h', Tab::Heatmap),
+            ('s', Tab::Spark),
+            ('d', Tab::Diagnostic),
+        ] {
+            press(&mut state, KeyCode::Char(key));
+            assert_eq!(state.active_tab, tab);
+            press(&mut state, KeyCode::Esc);
+            assert_eq!(state.active_tab, Tab::Hotspots);
+        }
+
+        press(&mut state, KeyCode::Char('/'));
+        press(&mut state, KeyCode::Char('7'));
+        assert!(state.is_searching);
+        press(&mut state, KeyCode::Enter);
+        assert!(!state.is_searching);
+        assert_eq!(state.search_query, "7");
+        press(&mut state, KeyCode::Char('q'));
+        assert!(state.should_quit);
     }
 }

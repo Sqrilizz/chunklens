@@ -1,4 +1,4 @@
-use std::borrow::Cow;
+use std::{borrow::Cow, collections::BTreeMap};
 
 use anyhow::{Result, ensure};
 use fastnbt::borrow::LongArray;
@@ -108,29 +108,22 @@ pub fn extract(
                 continue;
             }
             metric.block_entity_count += 1;
-            *metric.block_entity_types.entry(id.to_owned()).or_default() += 1;
+            bump(&mut metric.block_entity_types, id, 1);
             metric.stored_items += entity.items.len() as u64;
 
-            if id.contains("shulker_box") {
-                metric.shulkers += 1;
-            } else if id == "minecraft:hopper" {
-                metric.hoppers += 1;
-            } else if id == "minecraft:furnace"
-                || id == "minecraft:blast_furnace"
-                || id == "minecraft:smoker"
-            {
-                metric.furnaces += 1;
-            } else if id == "minecraft:chest"
-                || id == "minecraft:trapped_chest"
-                || id == "minecraft:barrel"
-            {
-                metric.chests += 1;
-            } else if id == "minecraft:spawner" || id == "minecraft:mob_spawner" {
-                metric.spawners += 1;
-            } else if id.contains("sign") {
-                metric.signs += 1;
-            } else if id.contains("skull") || id.contains("head") {
-                metric.skulls += 1;
+            match id {
+                _ if id.contains("shulker_box") => metric.shulkers += 1,
+                "minecraft:hopper" => metric.hoppers += 1,
+                "minecraft:furnace" | "minecraft:blast_furnace" | "minecraft:smoker" => {
+                    metric.furnaces += 1
+                }
+                "minecraft:chest" | "minecraft:trapped_chest" | "minecraft:barrel" => {
+                    metric.chests += 1
+                }
+                "minecraft:spawner" | "minecraft:mob_spawner" => metric.spawners += 1,
+                _ if id.contains("sign") => metric.signs += 1,
+                _ if id.contains("skull") || id.contains("head") => metric.skulls += 1,
+                _ => {}
             }
         }
         for section in &chunk.sections {
@@ -151,11 +144,20 @@ pub fn extract(
     Ok(metric)
 }
 
+#[inline]
+fn bump(map: &mut BTreeMap<String, u64>, key: &str, count: u64) {
+    if let Some(slot) = map.get_mut(key) {
+        *slot += count;
+    } else {
+        map.insert(key.to_owned(), count);
+    }
+}
+
 fn count_entity(entity: &Entity<'_>, metric: &mut ChunkMetrics) {
     let id = entity.id.as_ref();
     if !id.is_empty() {
         metric.entity_count += 1;
-        *metric.entity_types.entry(id.to_owned()).or_default() += 1;
+        bump(&mut metric.entity_types, id, 1);
         match id {
             "minecraft:villager" => metric.villagers += 1,
             "minecraft:armor_stand" => metric.armor_stands += 1,
@@ -208,9 +210,11 @@ fn is_actionable(name: &str) -> bool {
             | "bamboo"
             | "cactus"
             | "sugar_cane"
-    ) || ["redstone", "piston", "command", "hopper", "sensor"]
-        .iter()
-        .any(|part| name.contains(part))
+    ) || name.contains("redstone")
+        || name.contains("piston")
+        || name.contains("command")
+        || name.contains("hopper")
+        || name.contains("sensor")
 }
 
 fn count_palette(
@@ -229,14 +233,49 @@ fn count_palette(
     let data = data.ok_or_else(|| anyhow::anyhow!("missing packed block states"))?;
     let bits = (usize::BITS - (palette.len() - 1).leading_zeros()).max(4) as usize;
     let per_long = 64 / bits;
-    let longs: Vec<u64> = data.iter().map(|n| n as u64).collect();
+
+    let mut stack_longs = [0_u64; 512];
+    let mut heap_longs;
+    let longs: &[u64] = {
+        let mut count = 0;
+        let mut iter = data.iter();
+        while count < 512 {
+            if let Some(val) = iter.next() {
+                stack_longs[count] = val as u64;
+                count += 1;
+            } else {
+                break;
+            }
+        }
+        if let Some(first_overflow) = iter.next() {
+            heap_longs = Vec::with_capacity(1024);
+            heap_longs.extend_from_slice(&stack_longs);
+            heap_longs.push(first_overflow as u64);
+            for val in iter {
+                heap_longs.push(val as u64);
+            }
+            &heap_longs[..]
+        } else {
+            &stack_longs[..count]
+        }
+    };
+
     let padded = longs.len() == 4096_usize.div_ceil(per_long);
     ensure!(
         padded || longs.len() == (4096 * bits).div_ceil(64),
         "invalid packed block state length"
     );
     let mask = (1_u64 << bits) - 1;
-    let mut counts = vec![0_u16; palette.len()];
+
+    let mut stack_counts = [0_u16; 256];
+    let mut heap_counts;
+    let counts: &mut [u16] = if palette.len() <= stack_counts.len() {
+        &mut stack_counts[..palette.len()]
+    } else {
+        heap_counts = vec![0_u16; palette.len()];
+        &mut heap_counts[..]
+    };
+
     for index in 0..4096 {
         let value = if padded {
             (longs[index / per_long] >> ((index % per_long) * bits)) & mask
@@ -254,7 +293,7 @@ fn count_palette(
             .ok_or_else(|| anyhow::anyhow!("block state index exceeds palette"))?;
         *count += 1;
     }
-    for (state, count) in palette.iter().zip(counts) {
+    for (state, &count) in palette.iter().zip(counts.iter()) {
         if count > 0 && is_actionable(&state.name) {
             add_block(&state.name, count as u64, metric);
         }
@@ -271,7 +310,7 @@ fn add_block(name: &str, count: u64, metric: &mut ChunkMetrics) {
         "minecraft:piston" | "minecraft:sticky_piston" => metric.pistons += count,
         _ => {}
     }
-    *metric.block_types.entry(name.to_owned()).or_default() += count;
+    bump(&mut metric.block_types, name, count);
 }
 
 #[cfg(test)]

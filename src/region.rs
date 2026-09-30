@@ -36,6 +36,26 @@ pub fn for_each_chunk_with_buffers<F>(
     path: &Path,
     file_buf: &mut Vec<u8>,
     decompress_buf: &mut Vec<u8>,
+    callback: F,
+) -> Result<()>
+where
+    F: FnMut(usize, Result<&[u8]>),
+{
+    let mut decompressor = libdeflater::Decompressor::new();
+    for_each_chunk_with_buffers_and_decompressor(
+        path,
+        file_buf,
+        decompress_buf,
+        &mut decompressor,
+        callback,
+    )
+}
+
+pub fn for_each_chunk_with_buffers_and_decompressor<F>(
+    path: &Path,
+    file_buf: &mut Vec<u8>,
+    decompress_buf: &mut Vec<u8>,
+    decompressor: &mut libdeflater::Decompressor,
     mut callback: F,
 ) -> Result<()>
 where
@@ -123,7 +143,12 @@ where
             match fs::read(&ext_path) {
                 Ok(ext_payload) => {
                     decompress_buf.clear();
-                    match decompress_into(compression, &ext_payload, decompress_buf) {
+                    match decompress_into_with(
+                        decompressor,
+                        compression,
+                        &ext_payload,
+                        decompress_buf,
+                    ) {
                         Ok(()) => callback(index, Ok(decompress_buf.as_slice())),
                         Err(e) => callback(index, Err(e.context(format!("chunk slot {index}")))),
                     }
@@ -135,7 +160,7 @@ where
         } else {
             let raw_slice = &bytes[location + 5..location + 4 + length];
             decompress_buf.clear();
-            match decompress_into(compression, raw_slice, decompress_buf) {
+            match decompress_into_with(decompressor, compression, raw_slice, decompress_buf) {
                 Ok(()) => callback(index, Ok(decompress_buf.as_slice())),
                 Err(e) => callback(index, Err(e.context(format!("chunk slot {index}")))),
             }
@@ -145,18 +170,40 @@ where
 }
 
 pub fn decompress_into(compression: u8, payload: &[u8], output: &mut Vec<u8>) -> Result<()> {
+    let mut decompressor = libdeflater::Decompressor::new();
+    decompress_into_with(&mut decompressor, compression, payload, output)
+}
+
+pub fn decompress_into_with(
+    decompressor: &mut libdeflater::Decompressor,
+    compression: u8,
+    payload: &[u8],
+    output: &mut Vec<u8>,
+) -> Result<()> {
     output.clear();
     match compression & 0x7f {
-        1 => {
-            GzDecoder::new(payload)
-                .take(MAX_CHUNK_BYTES as u64 + 1)
-                .read_to_end(output)?;
-        }
-        2 => {
-            ZlibDecoder::new(payload)
-                .take(MAX_CHUNK_BYTES as u64 + 1)
-                .read_to_end(output)?;
-        }
+        1 => inflate_with(
+            payload,
+            output,
+            |p, out| decompressor.gzip_decompress(p, out),
+            |p, out| {
+                GzDecoder::new(p)
+                    .take(MAX_CHUNK_BYTES as u64 + 1)
+                    .read_to_end(out)?;
+                Ok(())
+            },
+        )?,
+        2 => inflate_with(
+            payload,
+            output,
+            |p, out| decompressor.zlib_decompress(p, out),
+            |p, out| {
+                ZlibDecoder::new(p)
+                    .take(MAX_CHUNK_BYTES as u64 + 1)
+                    .read_to_end(out)?;
+                Ok(())
+            },
+        )?,
         3 => {
             ensure!(
                 payload.len() <= MAX_CHUNK_BYTES,
@@ -172,6 +219,40 @@ pub fn decompress_into(compression: u8, payload: &[u8], output: &mut Vec<u8>) ->
         "chunk exceeds 64 MiB decompression limit"
     );
     Ok(())
+}
+
+fn inflate_with<F, R>(
+    payload: &[u8],
+    output: &mut Vec<u8>,
+    mut decompress: F,
+    fallback: R,
+) -> Result<()>
+where
+    F: FnMut(&[u8], &mut [u8]) -> std::result::Result<usize, libdeflater::DecompressionError>,
+    R: FnOnce(&[u8], &mut Vec<u8>) -> Result<()>,
+{
+    let mut target_len = (payload.len() * 6).clamp(64 * 1024, MAX_CHUNK_BYTES);
+    loop {
+        if output.len() < target_len {
+            output.resize(target_len, 0);
+        }
+        match decompress(payload, &mut output[..target_len]) {
+            Ok(written) => {
+                output.truncate(written);
+                return Ok(());
+            }
+            Err(libdeflater::DecompressionError::InsufficientSpace) => {
+                if target_len >= MAX_CHUNK_BYTES {
+                    bail!("chunk exceeds 64 MiB decompression limit");
+                }
+                target_len = (target_len * 2).min(MAX_CHUNK_BYTES);
+            }
+            Err(_) => {
+                output.clear();
+                return fallback(payload, output);
+            }
+        }
+    }
 }
 
 fn decompress_java_lz4(mut input: &[u8], output: &mut Vec<u8>) -> Result<()> {

@@ -2,8 +2,12 @@
 name = "chunklens"
 version = "0.1.0"
 edition = "2024"
-description = "Fast, read-only Minecraft Anvil world analyzer"
-license = "MIT"
+authors = ["Sqrilizz"]
+description = "Fast, lightweight Minecraft Anvil world scanner & lag investigator"
+repository = "https://github.com/Sqrilizz/chunklens"
+readme = "README.md"
+keywords = ["minecraft", "anvil", "nbt", "tui", "profiler"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 anyhow = "1.0"
@@ -25,6 +29,7 @@ tempfile = "3.15"
 rpassword = "7"
 xxhash-rust = { version = "0.8", features = ["xxh32"] }
 prost = "0.14"
+libdeflater = "1.26.1"
 
 [profile.release]
 opt-level = 3

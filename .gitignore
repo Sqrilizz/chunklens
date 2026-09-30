@@ -9,3 +9,5 @@
 /remote_configs_backup_original/
 /benchmarks/local/
 /live-spark*.json
+/*.bin
+*.tar.zst

@@ -12,7 +12,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use discovery::{Server, discover_servers, discover_worlds, server_at};
 use model::ScanResult;
@@ -122,7 +122,7 @@ enum Command {
         json: Option<PathBuf>,
         #[arg(long)]
         csv: Option<PathBuf>,
-        #[arg(long, default_value_t = 10)]
+        #[arg(short = 'n', long, default_value_t = 10)]
         top: usize,
         /// Inspect NBT size, oversized chunks (>1MB), and dense storage
         #[arg(short = 'b', long)]
@@ -131,7 +131,7 @@ enum Command {
     /// Load an existing JSON report for instant offline analysis without rescanning
     Load {
         report: PathBuf,
-        #[arg(long, default_value_t = 10)]
+        #[arg(short = 'n', long, default_value_t = 10)]
         top: usize,
         /// Inspect NBT size, oversized chunks (>1MB), and dense storage
         #[arg(short = 'b', long)]
@@ -143,6 +143,10 @@ enum Command {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    if std::env::args_os().len() == 1 {
+        return interactive_start();
+    }
 
     if let Some(cmd) = cli.command {
         match cmd {
@@ -347,6 +351,51 @@ fn print_quick_help() {
     println!("    \x1b[96mchunklens --help\x1b[0m           Show all CLI options and flags\n");
 }
 
+fn interactive_start() -> Result<()> {
+    use std::io::{self, Write};
+
+    let cwd = std::env::current_dir()?;
+    print_banner();
+    println!("  1. Scan server in this folder ({})", cwd.display());
+    println!("  2. Search for servers on this system");
+    println!("  Q. Quit");
+    loop {
+        print!("\n  Choice: ");
+        io::stdout().flush()?;
+        let mut choice = String::new();
+        if io::stdin().read_line(&mut choice)? == 0 {
+            return Ok(());
+        }
+        match choice.trim().to_ascii_lowercase().as_str() {
+            "1" => return launch_unified_tui(Some(local_world(&cwd)?), None, None, None),
+            "2" => return interactive_discovery(),
+            "q" => return Ok(()),
+            _ => println!("  Enter 1, 2, or Q."),
+        }
+    }
+}
+
+fn local_world(cwd: &std::path::Path) -> Result<PathBuf> {
+    if cwd.join("region").is_dir() {
+        return Ok(cwd.to_path_buf());
+    }
+    if !cwd.join("server.properties").is_file() && !cwd.join("eula.txt").is_file() {
+        bail!(
+            "{} is not a server or world folder; choose 2 to search for servers",
+            cwd.display()
+        );
+    }
+    let server = server_at(cwd)?;
+    let world = cwd.join(server.level_name.as_deref().unwrap_or("world"));
+    if !world.join("region").is_dir() {
+        bail!(
+            "no Anvil world found at {}; check the server's level-name setting",
+            world.display()
+        );
+    }
+    Ok(world)
+}
+
 fn launch_unified_tui(
     target: Option<PathBuf>,
     host: Option<String>,
@@ -526,37 +575,33 @@ fn print_servers(servers: &[Server]) {
         servers.len()
     );
     for (index, server) in servers.iter().enumerate() {
-        let (status_dot, status_badge) = if server.running {
-            let badge = if let (Some(online), Some(max), Some(lat)) =
+        let (status_dot, status_badge, badge_plain_len) = if server.running {
+            if let (Some(online), Some(max), Some(lat)) =
                 (server.online_players, server.max_players, server.latency_ms)
             {
-                format!(
-                    "\x1b[1;38;2;52;211;153mONLINE\x1b[0m \x1b[38;2;148;163;184m({online}/{max} • {lat}ms)\x1b[0m"
+                (
+                    "\x1b[38;2;52;211;153m●\x1b[0m",
+                    format!(
+                        "\x1b[1;38;2;52;211;153mONLINE\x1b[0m \x1b[38;2;148;163;184m({online}/{max} • {lat}ms)\x1b[0m"
+                    ),
+                    format!("ONLINE ({online}/{max} • {lat}ms)").len() + 4,
                 )
             } else {
-                "\x1b[1;38;2;52;211;153mONLINE\x1b[0m".to_string()
-            };
-            ("\x1b[38;2;52;211;153m●\x1b[0m", badge)
+                (
+                    "\x1b[38;2;52;211;153m●\x1b[0m",
+                    "\x1b[1;38;2;52;211;153mONLINE\x1b[0m".to_string(),
+                    10,
+                )
+            }
         } else {
             (
                 "\x1b[38;2;100;116;139m○\x1b[0m",
-                "\x1b[38;2;100;116;139mOFFLINE\x1b[0m".to_string(),
+                "\x1b[38;2;100;116;139mUNKNOWN\x1b[0m".to_string(),
+                11,
             )
         };
         let software = server.software.as_deref().unwrap_or("Server");
         let port_str = server.port.map_or("?".to_owned(), |p| p.to_string());
-
-        let badge_plain_len = if server.running {
-            if let (Some(online), Some(max), Some(lat)) =
-                (server.online_players, server.max_players, server.latency_ms)
-            {
-                format!("ONLINE ({online}/{max} • {lat}ms)").len() + 4
-            } else {
-                10
-            }
-        } else {
-            11
-        };
 
         let header_prefix_len = 8; // "  ╭─ #1 "
         let name_len = server.name.chars().count();
@@ -759,6 +804,34 @@ pub fn print_scan(result: &ScanResult, count: usize, bloat_only: bool) {
         }
         println!(
             "  \x1b[90m────────────────────────────────────────────────────────────────────────────────────────\x1b[0m\n"
+        );
+    }
+}
+
+#[cfg(test)]
+mod launcher_tests {
+    use super::local_world;
+
+    #[test]
+    fn local_choice_only_scans_the_selected_folder() {
+        let directory = tempfile::tempdir().unwrap();
+        let nested = directory.path().join("unrelated/world/region");
+        std::fs::create_dir_all(&nested).unwrap();
+        assert!(local_world(directory.path()).is_err());
+
+        std::fs::write(
+            directory.path().join("server.properties"),
+            "level-name=survival\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(directory.path().join("survival/region")).unwrap();
+        assert_eq!(
+            local_world(directory.path()).unwrap(),
+            directory.path().join("survival")
+        );
+        assert_eq!(
+            local_world(&directory.path().join("survival")).unwrap(),
+            directory.path().join("survival")
         );
     }
 }

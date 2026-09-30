@@ -5,7 +5,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{
         Block, BorderType, Borders, Clear, Gauge, List, ListItem, Paragraph, Row, Sparkline, Table,
-        Tabs, Wrap,
+        Wrap,
     },
 };
 
@@ -30,10 +30,10 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // Header
-            Constraint::Length(3), // Tabs
-            Constraint::Min(10),   // Main View
-            Constraint::Length(3), // Footer
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(10),
+            Constraint::Length(1),
         ])
         .split(size);
 
@@ -54,10 +54,6 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
 
     if state.help_visible {
         render_help(frame, size);
-    } else if state.is_searching {
-        render_search_modal(frame, state, size);
-    } else if let Some((msg, _)) = &state.notification {
-        render_toast(frame, msg, size);
     }
 }
 
@@ -98,46 +94,46 @@ fn render_header(frame: &mut Frame, state: &AppState, area: Rect) {
         ),
         Span::styled(connection, Style::default().fg(color)),
     ];
-    frame.render_widget(
-        Paragraph::new(Line::from(spans)).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(COLOR_BORDER)),
-        ),
-        area,
-    );
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn render_tabs(frame: &mut Frame, state: &AppState, area: Rect) {
-    let titles = Tab::titles()
-        .iter()
-        .map(|t| Line::from(Span::raw(*t)))
-        .collect::<Vec<_>>();
-
-    let tabs = Tabs::new(titles)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(COLOR_BORDER)),
-        )
-        .select(state.active_tab.to_index())
-        .style(Style::default().fg(COLOR_MUTED))
-        .highlight_style(
+    let labels = ["1 Chunks", "2 Clusters", "3 Live", "4 Console"];
+    let mut spans = Vec::new();
+    for (index, label) in labels.iter().enumerate() {
+        spans.push(Span::styled(
+            format!(" {label} "),
+            if state.active_tab.primary_index() == Some(index) {
+                Style::default()
+                    .fg(Color::White)
+                    .bg(COLOR_PRIMARY)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(COLOR_MUTED)
+            },
+        ));
+        spans.push(Span::raw(" "));
+    }
+    let advanced = match state.active_tab {
+        Tab::Heatmap => Some("Heatmap"),
+        Tab::Diagnostic => Some("Inspector"),
+        Tab::Spark => Some("Spark"),
+        _ => None,
+    };
+    if let Some(name) = advanced {
+        spans.push(Span::styled(
+            format!("  {name}"),
             Style::default()
-                .fg(COLOR_PRIMARY)
-                .add_modifier(Modifier::BOLD)
-                .bg(Color::Rgb(30, 27, 75)),
-        )
-        .divider(Span::styled("│", Style::default().fg(COLOR_BORDER)));
-
-    frame.render_widget(tabs, area);
+                .fg(COLOR_ACCENT)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn render_monitor(frame: &mut Frame, state: &AppState, area: Rect) {
     if state.server_host.is_empty() {
-        let message = "Live monitoring is optional.\n\nchunklens watch localhost:25565\nchunklens tui report.json.gz --host localhost:25565\n\nSLP shows server status and response time.\nA saved world score estimates potential load; it does not measure MSPT.\n\nPress Tab to explore a loaded report, or ? for help.";
+        let message = "No live server selected.\n\nRun: chunklens tui report.json.gz --host example.com\nOr:  chunklens watch example.com\n\nPress 1 for chunks, or ? for keys.";
         frame.render_widget(
             Paragraph::new(message).wrap(Wrap { trim: false }).block(
                 Block::default()
@@ -358,16 +354,7 @@ fn render_hotspots(frame: &mut Frame, state: &mut AppState, area: Rect) {
         );
         return;
     }
-    let preview = area.width >= 150;
-    let regions = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints(if preview {
-            vec![Constraint::Percentage(70), Constraint::Percentage(30)]
-        } else {
-            vec![Constraint::Percentage(100)]
-        })
-        .split(area);
-    let capacity = regions[0].height.saturating_sub(5).max(1) as usize;
+    let capacity = area.height.saturating_sub(3).max(1) as usize;
     state.page_size = capacity;
     let selected = state.table_state.selected().unwrap_or(0);
     if selected < state.table_scroll {
@@ -376,32 +363,31 @@ fn render_hotspots(frame: &mut Frame, state: &mut AppState, area: Rect) {
     if selected >= state.table_scroll + capacity {
         state.table_scroll = selected + 1 - capacity;
     }
-    let visible_columns: &[usize] = if regions[0].width >= 105 {
+    let visible_columns: &[usize] = if area.width >= 110 {
         &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-    } else if regions[0].width >= 80 {
-        &[0, 2, 4, 5, 6, 7, 9]
+    } else if area.width >= 80 {
+        &[0, 2, 3, 4, 5, 6, 7, 8]
     } else {
-        &[2, 4, 6, 7, 9]
+        &[2, 4, 5, 6, 7, 8]
     };
     let headings = [
         "#",
-        "Dimension",
-        "Chunk X, Z",
-        "Block X, Z",
+        "Dim",
+        "Chunk X,Z",
+        "Block X,Z",
         "Score",
-        "Band",
-        "Entities",
-        "Hoppers",
-        "Redstone",
-        "Villagers",
+        "Ent",
+        "Vil",
+        "Hop",
+        "Red",
+        "Signals",
     ];
-    let widths = [4, 10, 14, 15, 7, 10, 8, 8, 8, 9];
+    let widths = [4, 10, 14, 15, 7, 6, 6, 6, 7, 15];
     let header = Row::new(
         visible_columns
             .iter()
             .map(|&i| Span::styled(headings[i], Style::default().fg(COLOR_PRIMARY))),
-    )
-    .bottom_margin(1);
+    );
     let rows: Vec<Row> = state
         .filtered_chunk_indices
         .iter()
@@ -416,12 +402,12 @@ fn render_hotspots(frame: &mut Frame, state: &mut AppState, area: Rect) {
                 format!("{}, {}", c.chunk_x, c.chunk_z),
                 format!("{}, {}", c.block_x(), c.block_z()),
                 format!("{:.1}", c.score),
-                c.severity().into(),
                 c.entity_count.to_string(),
+                c.villagers.to_string(),
                 c.hoppers.to_string(),
                 (c.redstone_wire + c.repeaters + c.comparators + c.observers + c.pistons)
                     .to_string(),
-                c.villagers.to_string(),
+                c.culprits_summary(),
             ];
             Row::new(
                 visible_columns
@@ -429,7 +415,7 @@ fn render_hotspots(frame: &mut Frame, state: &mut AppState, area: Rect) {
                     .map(|&i| {
                         Span::styled(
                             values[i].clone(),
-                            if i == 4 || i == 5 {
+                            if i == 4 {
                                 score_to_style(c.score)
                             } else {
                                 Style::default().fg(Color::White)
@@ -441,14 +427,14 @@ fn render_hotspots(frame: &mut Frame, state: &mut AppState, area: Rect) {
         })
         .collect();
     let title = format!(
-        " Chunks · {} matches · {} at 80+ · Potential Load Score ",
+        " Chunks · {} matches · {} score 80+ ",
         state.filtered_chunk_indices.len(),
         state.high_score_chunks
     );
     let table = Table::new(
         rows,
         visible_columns.iter().map(|&i| {
-            if i == 2 {
+            if i == 9 {
                 Constraint::Min(widths[i])
             } else {
                 Constraint::Length(widths[i])
@@ -471,112 +457,7 @@ fn render_hotspots(frame: &mut Frame, state: &mut AppState, area: Rect) {
     .highlight_symbol("› ");
     let mut local_state = ratatui::widgets::TableState::default();
     local_state.select(Some(selected.saturating_sub(state.table_scroll)));
-    frame.render_stateful_widget(table, regions[0], &mut local_state);
-    if preview {
-        render_chunk_preview(frame, state, regions[1]);
-    }
-}
-
-fn render_chunk_preview(frame: &mut Frame, state: &AppState, area: Rect) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(COLOR_BORDER))
-        .title(Span::styled(
-            " Selected Chunk Preview ",
-            Style::default()
-                .fg(COLOR_ACCENT)
-                .add_modifier(Modifier::BOLD),
-        ));
-
-    if let Some(c) = state.selected_chunk() {
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-
-        let lines = vec![
-            Line::from(vec![
-                Span::styled("Chunk: ", Style::default().fg(COLOR_MUTED)),
-                Span::styled(
-                    format!("[{}, {}]", c.chunk_x, c.chunk_z),
-                    Style::default()
-                        .fg(COLOR_PRIMARY)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled("  Block: ", Style::default().fg(COLOR_MUTED)),
-                Span::styled(
-                    format!("[{}, {}]", c.block_x(), c.block_z()),
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled("Dimension: ", Style::default().fg(COLOR_MUTED)),
-                Span::styled(&c.dimension, Style::default().fg(Color::White)),
-            ]),
-            Line::from(vec![
-                Span::styled("Lag Score: ", Style::default().fg(COLOR_MUTED)),
-                Span::styled(
-                    format!("{:.1}", c.score),
-                    score_to_style(c.score).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(format!(" [{}]", c.severity()), score_to_style(c.score)),
-            ]),
-            Line::from(""),
-            Line::from(vec![
-                Span::styled("Teleport: ", Style::default().fg(COLOR_MUTED)),
-                Span::styled(
-                    c.tp_command(),
-                    Style::default()
-                        .fg(COLOR_SUCCESS)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ]),
-            Line::from(Span::styled(
-                "Press 'C' to copy teleport command",
-                Style::default().fg(COLOR_MUTED),
-            )),
-            Line::from(""),
-            Line::from(Span::styled(
-                "Key Metrics:",
-                Style::default()
-                    .fg(COLOR_PRIMARY)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from(format!("  • Entities:          {}", c.entity_count)),
-            Line::from(format!("  • Block Entities:    {}", c.block_entity_count)),
-            Line::from(format!(
-                "  • Hoppers & Carts:   {}",
-                c.hoppers + c.hopper_minecarts
-            )),
-            Line::from(format!("  • Villagers:         {}", c.villagers)),
-            Line::from(format!(
-                "  • Redstone Active:   {}",
-                c.redstone_wire + c.repeaters + c.comparators + c.observers + c.pistons
-            )),
-            Line::from(format!(
-                "  • Loose Items / XP:  {} / {}",
-                c.dropped_items, c.exp_orbs
-            )),
-            Line::from(format!("  • Scheduled Ticks:   {}", c.scheduled_ticks)),
-            Line::from(format!("  • Item Frames:       {}", c.item_frames)),
-            Line::from(""),
-            Line::from(Span::styled(
-                "Press [Enter] for Deep Diagnostic Inspector",
-                Style::default().fg(COLOR_ACCENT),
-            )),
-        ];
-
-        let p = Paragraph::new(lines).wrap(Wrap { trim: false });
-        frame.render_widget(p, inner);
-    } else {
-        frame.render_widget(
-            Paragraph::new("No chunk selected")
-                .style(Style::default().fg(COLOR_MUTED))
-                .block(block),
-            area,
-        );
-    }
+    frame.render_stateful_widget(table, area, &mut local_state);
 }
 
 fn render_heatmap(frame: &mut Frame, state: &AppState, area: Rect) {
@@ -834,6 +715,63 @@ fn render_diagnostic(frame: &mut Frame, state: &AppState, area: Rect) {
     if let Some(c) = state.selected_chunk() {
         let inner = block.inner(area);
         frame.render_widget(block, area);
+
+        if area.width < 72 {
+            let top_entities = c
+                .entity_types
+                .iter()
+                .max_by_key(|(_, count)| *count)
+                .map(|(name, count)| {
+                    format!("{} ×{}", name.trim_start_matches("minecraft:"), count)
+                })
+                .unwrap_or_else(|| "none".to_owned());
+            let top_blocks = c
+                .block_entity_types
+                .iter()
+                .max_by_key(|(_, count)| *count)
+                .map(|(name, count)| {
+                    format!("{} ×{}", name.trim_start_matches("minecraft:"), count)
+                })
+                .unwrap_or_else(|| "none".to_owned());
+            let lines = vec![
+                Line::from(format!(
+                    "{}  chunk {}, {}",
+                    c.dimension, c.chunk_x, c.chunk_z
+                )),
+                Line::from(format!(
+                    "Block {}, {}  ·  {}",
+                    c.block_x(),
+                    c.block_z(),
+                    c.tp_command()
+                )),
+                Line::from(format!("Score {:.1}/100  ·  {}", c.score, c.severity())),
+                Line::from(""),
+                Line::from(format!(
+                    "Entities {:>6}  ·  villagers {}",
+                    c.entity_count, c.villagers
+                )),
+                Line::from(format!("Top entity    {top_entities}")),
+                Line::from(format!(
+                    "Block ent {:>5}  ·  hoppers {}",
+                    c.block_entity_count, c.hoppers
+                )),
+                Line::from(format!("Top block     {top_blocks}")),
+                Line::from(format!(
+                    "Redstone      wire {}  repeater {}  comparator {}",
+                    c.redstone_wire, c.repeaters, c.comparators
+                )),
+                Line::from(format!(
+                    "              observer {}  piston {}",
+                    c.observers, c.pistons
+                )),
+                Line::from(format!(
+                    "Scheduled ticks {}  ·  items {}  ·  XP {}",
+                    c.scheduled_ticks, c.dropped_items, c.exp_orbs
+                )),
+            ];
+            frame.render_widget(Paragraph::new(lines), inner);
+            return;
+        }
 
         let diag_layout = Layout::default()
             .direction(Direction::Vertical)
@@ -1368,30 +1306,34 @@ fn render_rcon(frame: &mut Frame, state: &AppState, area: Rect) {
 }
 
 fn render_footer(frame: &mut Frame, state: &AppState, area: Rect) {
-    let shortcuts = match state.active_tab {
-        Tab::Rcon => "Enter Send · ↑↓ History · Tab Switch · F1 Help · Ctrl-C Quit",
-        Tab::Heatmap => "Arrows Pan · +/- Zoom · Tab Switch · ? Help · Q Quit",
-        Tab::Monitor => "R Refresh · Tab Switch · ? Help · Q Quit",
-        _ => "↑↓ Select · Enter Inspect · / Filter · C Copy · ? Help · Q Quit",
+    let text = if state.is_searching {
+        format!(" /{}█  ·  Enter apply · Esc cancel", state.search_query)
+    } else if let Some((message, _)) = &state.notification {
+        format!(" {message}")
+    } else {
+        let shortcuts = match state.active_tab {
+            Tab::Rcon => "Enter send · ↑↓ history · Tab switch · F1 help · Ctrl-C quit",
+            Tab::Heatmap => "Arrows pan · +/- zoom · Esc chunks · ? help · Q quit",
+            Tab::Monitor => "R refresh · S Spark · Tab switch · ? help · Q quit",
+            Tab::Diagnostic | Tab::Spark => "Esc chunks · Tab switch · ? help · Q quit",
+            _ => "↑↓ move · Enter inspect · / find · C copy · H map · S Spark · ? keys · Q quit",
+        };
+        if state.search_query.is_empty() {
+            format!(" {shortcuts}")
+        } else {
+            format!(" /{}  ·  {shortcuts}", state.search_query)
+        }
     };
     frame.render_widget(
-        Paragraph::new(shortcuts)
-            .style(Style::default().fg(COLOR_MUTED))
-            .alignment(Alignment::Center)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .border_style(Style::default().fg(COLOR_BORDER)),
-            ),
+        Paragraph::new(text).style(Style::default().fg(COLOR_MUTED)),
         area,
     );
 }
 
 fn render_help(frame: &mut Frame, area: Rect) {
-    let popup = centered_rect(88, 80, area);
+    let popup = centered_rect(90, 90, area);
     frame.render_widget(Clear, popup);
-    let text = "KEYBOARD\n\nTab / Shift-Tab     Next / previous view\n1–7                 Jump to a view\n↑↓ or J/K           Select a chunk or cluster\nPage Up / Down      Move one visible page\nEnter               Inspect selected chunk\n/                   Filter by dimension, coordinates, or score\nEscape              Cancel filter / leave console\nC                   Copy the selected teleport command\nArrows, + / -       Pan and zoom the heatmap\nR                   Refresh live server status\nQ / Ctrl-C          Quit (Ctrl-C also works in the console)\n\nScores describe saved content. They do not measure live MSPT.\nPress any key to return.";
+    let text = "1 Chunks · 2 Clusters · 3 Live · 4 Console\nTab / Shift-Tab  Switch main view\n↑↓ or J/K         Select row\nPgUp / PgDn       Move a page\nEnter or D        Inspect selected chunk\n/                 Filter dimension, coords, score\nC                 Copy teleport command\nH                 Open heatmap\nS                 Open Spark report\nR                 Refresh live status\nEsc               Back to chunks; quit from chunks\nQ or Ctrl-C       Quit\n\nScores are offline estimates, not live MSPT.";
     frame.render_widget(
         Paragraph::new(text).wrap(Wrap { trim: false }).block(
             Block::default()
@@ -1402,79 +1344,6 @@ fn render_help(frame: &mut Frame, area: Rect) {
         ),
         popup,
     );
-}
-
-fn render_search_modal(frame: &mut Frame, state: &AppState, area: Rect) {
-    let popup_area = centered_rect(50, 20, area);
-    frame.render_widget(Clear, popup_area);
-
-    let text = vec![
-        Line::from(Span::styled(
-            "Type filter (dim, x,z, score):",
-            Style::default().fg(COLOR_MUTED),
-        )),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled(
-                " > ",
-                Style::default()
-                    .fg(COLOR_PRIMARY)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                &state.search_query,
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("█", Style::default().fg(COLOR_PRIMARY)),
-        ]),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Press [Enter] to apply, [Esc] to cancel",
-            Style::default().fg(COLOR_MUTED),
-        )),
-    ];
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(COLOR_PRIMARY))
-        .title(Span::styled(
-            " Search & Filter ",
-            Style::default()
-                .fg(COLOR_PRIMARY)
-                .add_modifier(Modifier::BOLD),
-        ));
-
-    frame.render_widget(Paragraph::new(text).block(block), popup_area);
-}
-
-fn render_toast(frame: &mut Frame, msg: &str, area: Rect) {
-    let toast_area = Rect {
-        x: area.width.saturating_sub(52).max(2),
-        y: area.height.saturating_sub(5),
-        width: 50.min(area.width.saturating_sub(4)),
-        height: 3,
-    };
-    frame.render_widget(Clear, toast_area);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(COLOR_SUCCESS))
-        .title(Span::styled(" Notice ", Style::default().fg(COLOR_SUCCESS)));
-
-    let p = Paragraph::new(Line::from(Span::styled(
-        msg,
-        Style::default()
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD),
-    )))
-    .block(block)
-    .alignment(Alignment::Center);
-
-    frame.render_widget(p, toast_area);
 }
 
 fn score_to_style(score: f64) -> Style {
@@ -1529,7 +1398,7 @@ mod tests {
 
     #[test]
     fn renders_all_tabs_at_common_sizes() {
-        for (width, height) in [(40, 12), (80, 24), (120, 40), (180, 50)] {
+        for (width, height) in [(40, 12), (60, 18), (80, 24), (120, 40), (180, 50)] {
             let scan = ScanResult {
                 chunks: vec![ChunkMetrics {
                     dimension: "world".into(),
@@ -1540,8 +1409,16 @@ mod tests {
             };
             let mut app = AppState::new(scan, None, None, None, None);
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-            for index in 0..7 {
-                app.active_tab = Tab::from_index(index);
+            for tab in [
+                Tab::Hotspots,
+                Tab::Clusters,
+                Tab::Monitor,
+                Tab::Rcon,
+                Tab::Heatmap,
+                Tab::Diagnostic,
+                Tab::Spark,
+            ] {
+                app.active_tab = tab;
                 terminal.draw(|frame| render(frame, &mut app)).unwrap();
             }
             app.help_visible = true;

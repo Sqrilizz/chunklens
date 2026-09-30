@@ -161,57 +161,48 @@ pub fn scan_world(world: &Path, options: ScanOptions) -> Result<ScanResult> {
     let started = Instant::now();
     let weights = ScoreWeights::default();
     let groups: Vec<_> = pairs.into_values().collect();
+    let dimension = world
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("world")
+        .to_string();
     let mut result = pool.install(|| {
         groups
             .par_iter()
-            .map_init(
-                || {
-                    (
-                        Vec::with_capacity(1024 * 1024),
-                        Vec::with_capacity(512 * 1024),
-                    )
-                },
-                |(file_buf, decompressed), files| {
-                    let mut combined = HashMap::<(i32, i32), ChunkMetrics>::new();
-                    let mut result = FileScan {
-                        metrics: Vec::new(),
-                        skipped: 0,
-                        warnings: Vec::new(),
-                        total_scanned: 0,
-                    };
-                    for (path, entities_only) in files {
-                        match scan_file(path, world, *entities_only, file_buf, decompressed) {
-                            Ok(scan) => {
-                                for metric in scan.metrics {
-                                    merge_metric(
-                                        combined
-                                            .entry((metric.chunk_x, metric.chunk_z))
-                                            .or_default(),
-                                        metric,
-                                    );
-                                }
-                                result.skipped += scan.skipped;
-                                result.warnings.extend(scan.warnings);
-                            }
-                            Err(error) => {
-                                result.skipped += 1;
-                                result
-                                    .warnings
-                                    .push(format!("{}: {error:#}", path.display()));
-                            }
-                        }
-                        progress.inc(1);
+            .map_init(ScanBuffers::new, |buffers, files| {
+                let mut combined = HashMap::<(i32, i32), ChunkMetrics>::with_capacity(1024);
+                let mut result = FileScan {
+                    metrics: Vec::new(),
+                    skipped: 0,
+                    warnings: Vec::new(),
+                    total_scanned: 0,
+                };
+                for (path, entities_only) in files {
+                    if let Err(error) = scan_file(
+                        path,
+                        *entities_only,
+                        buffers,
+                        &mut combined,
+                        &mut result.skipped,
+                        &mut result.warnings,
+                    ) {
+                        result.skipped += 1;
+                        result
+                            .warnings
+                            .push(format!("{}: {error:#}", path.display()));
                     }
-                    result.total_scanned = combined.len() as u64;
-                    for mut metric in combined.into_values() {
-                        metric.score = score(&metric, &weights);
-                        if metric.score >= options.min_score.min(20.0) || metric.is_bloat_hazard() {
-                            result.metrics.push(metric);
-                        }
+                    progress.inc(1);
+                }
+                result.total_scanned = combined.len() as u64;
+                for mut metric in combined.into_values() {
+                    metric.score = score(&metric, &weights);
+                    if metric.score >= options.min_score.min(20.0) || metric.is_bloat_hazard() {
+                        metric.dimension = dimension.clone();
+                        result.metrics.push(metric);
                     }
-                    result
-                },
-            )
+                }
+                result
+            })
             .reduce(FileScan::default, |mut left, mut right| {
                 left.metrics.append(&mut right.metrics);
                 left.skipped += right.skipped;
@@ -277,86 +268,93 @@ struct FileScan {
     total_scanned: u64,
 }
 
+struct ScanBuffers {
+    file: Vec<u8>,
+    decompress: Vec<u8>,
+    decompressor: libdeflater::Decompressor,
+}
+
+impl ScanBuffers {
+    fn new() -> Self {
+        Self {
+            file: Vec::with_capacity(4 * 1024 * 1024),
+            decompress: Vec::with_capacity(512 * 1024),
+            decompressor: libdeflater::Decompressor::new(),
+        }
+    }
+}
+
 fn scan_file(
     path: &Path,
-    world: &Path,
     entities_only: bool,
-    file_buf: &mut Vec<u8>,
-    decompress_buf: &mut Vec<u8>,
-) -> Result<FileScan> {
+    buffers: &mut ScanBuffers,
+    combined: &mut HashMap<(i32, i32), ChunkMetrics>,
+    skipped: &mut u64,
+    warnings: &mut Vec<String>,
+) -> Result<()> {
     let (region_x, region_z) =
         region::region_coordinates(path).context("invalid region filename")?;
-    let dimension = world
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("world")
-        .to_string();
-    let mut output = Vec::with_capacity(512);
-    let mut warnings = Vec::new();
-    let mut skipped = 0;
 
-    region::for_each_chunk_with_buffers(path, file_buf, decompress_buf, |slot, chunk_res| {
-        let bytes = match chunk_res {
-            Ok(value) => value,
-            Err(error) => {
-                skipped += 1;
-                warnings.push(format!("WARN {}: {error:#}", path.display()));
+    region::for_each_chunk_with_buffers_and_decompressor(
+        path,
+        &mut buffers.file,
+        &mut buffers.decompress,
+        &mut buffers.decompressor,
+        |slot, chunk_res| {
+            let bytes = match chunk_res {
+                Ok(value) => value,
+                Err(error) => {
+                    *skipped += 1;
+                    warnings.push(format!("WARN {}: {error:#}", path.display()));
+                    return;
+                }
+            };
+            let local_x = (slot % 32) as i32;
+            let local_z = (slot / 32) as i32;
+            let Some(x) = region_x
+                .checked_mul(32)
+                .and_then(|v| v.checked_add(local_x))
+            else {
+                *skipped += 1;
+                warnings.push(format!("{}: chunk X coordinate overflow", path.display()));
                 return;
-            }
-        };
-        let local_x = (slot % 32) as i32;
-        let local_z = (slot / 32) as i32;
-        let Some(x) = region_x
-            .checked_mul(32)
-            .and_then(|v| v.checked_add(local_x))
-        else {
-            skipped += 1;
-            warnings.push(format!("{}: chunk X coordinate overflow", path.display()));
-            return;
-        };
-        let Some(z) = region_z
-            .checked_mul(32)
-            .and_then(|v| v.checked_add(local_z))
-        else {
-            skipped += 1;
-            warnings.push(format!("{}: chunk Z coordinate overflow", path.display()));
-            return;
-        };
-        let metric = match nbt::extract(bytes, &dimension, x, z, entities_only) {
-            Ok(metric) => metric,
-            Err(error) => {
-                skipped += 1;
+            };
+            let Some(z) = region_z
+                .checked_mul(32)
+                .and_then(|v| v.checked_add(local_z))
+            else {
+                *skipped += 1;
+                warnings.push(format!("{}: chunk Z coordinate overflow", path.display()));
+                return;
+            };
+            let metric = match nbt::extract(bytes, "", x, z, entities_only) {
+                Ok(metric) => metric,
+                Err(error) => {
+                    *skipped += 1;
+                    warnings.push(format!(
+                        "{} chunk slot {slot}: invalid NBT: {error:#}",
+                        path.display()
+                    ));
+                    return;
+                }
+            };
+            if metric.is_oversized {
                 warnings.push(format!(
-                    "{} chunk slot {slot}: invalid NBT: {error:#}",
-                    path.display()
+                    "{} chunk [{}, {}]: large saved NBT ({:.2} MiB); inspect its contents",
+                    path.display(),
+                    metric.chunk_x,
+                    metric.chunk_z,
+                    metric.payload_size as f64 / 1_048_576.0
                 ));
-                return;
             }
-        };
-        if metric.is_oversized {
-            warnings.push(format!(
-                "{} chunk [{}, {}]: large saved NBT ({:.2} MiB); inspect its contents",
-                path.display(),
-                metric.chunk_x,
-                metric.chunk_z,
-                metric.payload_size as f64 / 1_048_576.0
-            ));
-        }
 
-        output.push(metric);
-    })?;
-
-    Ok(FileScan {
-        total_scanned: output.len() as u64,
-        metrics: output,
-        skipped,
-        warnings,
-    })
+            merge_metric(combined.entry((x, z)).or_default(), metric);
+        },
+    )
 }
 
 fn merge_metric(target: &mut ChunkMetrics, incoming: ChunkMetrics) {
-    if target.dimension.is_empty() {
-        target.dimension = incoming.dimension;
+    if target.chunk_x == 0 && target.chunk_z == 0 && target.data_version.is_none() {
         target.chunk_x = incoming.chunk_x;
         target.chunk_z = incoming.chunk_z;
         target.data_version = incoming.data_version;
@@ -386,14 +384,21 @@ fn merge_metric(target: &mut ChunkMetrics, incoming: ChunkMetrics) {
     target.comparators += incoming.comparators;
     target.observers += incoming.observers;
     target.pistons += incoming.pistons;
-    for (id, count) in incoming.entity_types {
-        *target.entity_types.entry(id).or_default() += count;
-    }
-    for (id, count) in incoming.block_entity_types {
-        *target.block_entity_types.entry(id).or_default() += count;
-    }
-    for (id, count) in incoming.block_types {
-        *target.block_types.entry(id).or_default() += count;
+    merge_map(&mut target.entity_types, incoming.entity_types);
+    merge_map(&mut target.block_entity_types, incoming.block_entity_types);
+    merge_map(&mut target.block_types, incoming.block_types);
+}
+
+fn merge_map(
+    target: &mut std::collections::BTreeMap<String, u64>,
+    incoming: std::collections::BTreeMap<String, u64>,
+) {
+    if target.is_empty() {
+        *target = incoming;
+    } else {
+        for (id, count) in incoming {
+            *target.entry(id).or_default() += count;
+        }
     }
 }
 

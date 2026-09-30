@@ -1,7 +1,7 @@
 use anyhow::Result;
 use serde::Serialize;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -123,16 +123,18 @@ pub fn discover_servers_in_targets(targets: &[(PathBuf, usize)]) -> Result<Vec<S
     paths.sort();
     paths.dedup();
     let panel_meta = load_panel_servers();
+    let running_paths = running_server_paths();
     Ok(paths
         .into_iter()
-        .filter_map(|path| read_server(&path, &panel_meta).ok())
+        .filter_map(|path| read_server(&path, &panel_meta, &running_paths).ok())
         .collect())
 }
 
 pub fn server_at(path: &Path) -> Result<Server> {
     let panel_meta = load_panel_servers();
     if path.join("server.properties").is_file() || path.join("eula.txt").is_file() {
-        return read_server(path, &panel_meta);
+        let absolute = path.canonicalize()?;
+        return read_server(&absolute, &panel_meta, &running_server_paths());
     }
     let dir_name = path
         .file_name()
@@ -158,7 +160,9 @@ pub fn server_at(path: &Path) -> Result<Server> {
         port: None,
         level_name: None,
         software: None,
-        running: server_running(path),
+        running: path
+            .canonicalize()
+            .is_ok_and(|path| running_server_paths().contains(&path)),
         online_players: None,
         max_players: None,
         latency_ms: None,
@@ -203,35 +207,6 @@ fn find_listening_addrs(port: u16) -> Vec<std::net::SocketAddr> {
     addrs.push(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port));
     addrs.dedup();
     addrs
-}
-
-fn is_port_listening(port: u16) -> bool {
-    use std::net::TcpStream;
-    use std::time::Duration;
-    let addrs = find_listening_addrs(port);
-    for addr in &addrs {
-        if TcpStream::connect_timeout(addr, Duration::from_millis(80)).is_ok() {
-            return true;
-        }
-    }
-    let hex_port = format!(":{:04X} ", port);
-    for net_file in ["/proc/net/tcp", "/proc/net/tcp6"] {
-        if let Ok(content) = fs::read_to_string(net_file) {
-            for line in content.lines() {
-                if let Some(pos) = line.find(&hex_port) {
-                    let rest = &line[pos + hex_port.len()..];
-                    let mut parts = rest.split_whitespace();
-                    let _rem = parts.next();
-                    if let Some(st) = parts.next()
-                        && (st == "0A" || st == "01")
-                    {
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-    false
 }
 
 fn detect_software(path: &Path) -> Option<String> {
@@ -425,7 +400,11 @@ fn fetch_wings_servers(port: u16, token: &str) -> Option<String> {
     None
 }
 
-fn read_server(path: &Path, panel_meta: &HashMap<String, PanelServerMeta>) -> Result<Server> {
+fn read_server(
+    path: &Path,
+    panel_meta: &HashMap<String, PanelServerMeta>,
+    running_paths: &HashSet<PathBuf>,
+) -> Result<Server> {
     if !path.join("server.properties").is_file()
         && !path.join("eula.txt").is_file()
         && !path.join("world").is_dir()
@@ -474,7 +453,9 @@ fn read_server(path: &Path, panel_meta: &HashMap<String, PanelServerMeta>) -> Re
     let mut latency_ms = None;
     let mut live_motd = None;
 
-    if let Some(p) = port {
+    let running = running_paths.contains(path);
+
+    if running && let Some(p) = port {
         use std::time::Duration;
         let addrs = find_listening_addrs(p);
         for addr in addrs {
@@ -494,9 +475,6 @@ fn read_server(path: &Path, panel_meta: &HashMap<String, PanelServerMeta>) -> Re
             }
         }
     }
-
-    let running =
-        online_players.is_some() || port.is_some_and(is_port_listening) || server_running(path);
 
     Ok(Server {
         name,
@@ -594,37 +572,42 @@ fn directory_size(path: &Path) -> u64 {
         .sum()
 }
 
-fn server_running(path: &Path) -> bool {
-    let Ok(server) = path.canonicalize() else {
-        return false;
-    };
+fn running_server_paths() -> HashSet<PathBuf> {
+    let mut paths = HashSet::new();
     let Ok(processes) = fs::read_dir("/proc") else {
-        return false;
+        return paths;
     };
-    let server_str = server.to_string_lossy();
     for entry in processes.flatten() {
         let name = entry.file_name();
         if !name.to_string_lossy().chars().all(|c| c.is_ascii_digit()) {
             continue;
         }
         let proc_path = entry.path();
-        if let Ok(cwd) = proc_path.join("cwd").canonicalize()
-            && cwd == server
-            && fs::read_link(proc_path.join("exe"))
-                .ok()
-                .and_then(|exe| exe.file_name().map(|name| name == "java"))
-                .unwrap_or(false)
-        {
-            return true;
+        let is_java = fs::read_link(proc_path.join("exe"))
+            .ok()
+            .and_then(|exe| {
+                exe.file_name()
+                    .map(|name| name.to_string_lossy().starts_with("java"))
+            })
+            .unwrap_or(false);
+        if !is_java {
+            continue;
         }
-        // Support Docker / FeatherPanel / Pterodactyl container mounts
-        if let Ok(mountinfo) = fs::read_to_string(proc_path.join("mountinfo"))
-            && mountinfo.contains(server_str.as_ref())
-        {
-            return true;
+        if let Ok(cwd) = proc_path.join("cwd").canonicalize() {
+            paths.insert(cwd);
+        }
+        if let Ok(mountinfo) = fs::read_to_string(proc_path.join("mountinfo")) {
+            for line in mountinfo.lines() {
+                if let Some(root) = line.split_whitespace().nth(3)
+                    && root.starts_with('/')
+                    && root != "/"
+                {
+                    paths.insert(PathBuf::from(root));
+                }
+            }
         }
     }
-    false
+    paths
 }
 
 pub fn ansi_motd(text: &str) -> String {
@@ -665,7 +648,8 @@ pub fn ansi_motd(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ansi_motd, discover_servers_in};
+    use super::{ansi_motd, discover_servers_in, read_server, running_server_paths};
+    use std::{collections::HashMap, net::TcpListener};
     #[test]
     fn minecraft_colors_are_converted() {
         assert!(ansi_motd("§aGreen").contains("\x1b[92mGreen"));
@@ -692,6 +676,22 @@ mod tests {
         let worlds = super::discover_worlds(dir.path()).unwrap();
         assert_eq!(worlds.len(), 4);
         assert!(worlds.iter().any(|w| w.name == "world/DIM-1"));
-        assert!(!super::server_running(dir.path()));
+        assert!(!running_server_paths().contains(dir.path()));
+    }
+
+    #[test]
+    fn another_server_on_the_same_port_does_not_mark_a_copy_online() {
+        let temp = tempfile::tempdir().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::fs::write(
+            temp.path().join("server.properties"),
+            format!("server-port={port}\n"),
+        )
+        .unwrap();
+
+        let server = read_server(temp.path(), &HashMap::new(), &running_server_paths()).unwrap();
+        assert!(!server.running);
+        assert!(server.online_players.is_none());
     }
 }

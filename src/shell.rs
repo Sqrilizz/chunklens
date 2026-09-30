@@ -16,7 +16,7 @@ pub fn run(server: Server, worlds: Vec<World>) -> Result<()> {
     } else {
         (
             "\x1b[38;2;100;116;139m○\x1b[0m",
-            "\x1b[38;2;100;116;139mOFFLINE\x1b[0m",
+            "\x1b[38;2;100;116;139mUNKNOWN\x1b[0m",
         )
     };
     let software = server.software.as_deref().unwrap_or("Server");

@@ -15,51 +15,34 @@ use crate::{
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
-    Monitor = 0,
-    Hotspots = 1,
-    Heatmap = 2,
-    Clusters = 3,
-    Diagnostic = 4,
-    Spark = 5,
-    Rcon = 6,
+    Monitor,
+    Hotspots,
+    Heatmap,
+    Clusters,
+    Diagnostic,
+    Spark,
+    Rcon,
 }
 
 impl Tab {
-    pub fn titles() -> [&'static str; 7] {
-        [
-            " 1 Monitor ",
-            " 2 Chunks ",
-            " 3 Heatmap ",
-            " 4 Clusters ",
-            " 5 Inspector ",
-            " 6 Spark ",
-            " 7 RCON ",
-        ]
+    pub const PRIMARY: [Self; 4] = [Self::Hotspots, Self::Clusters, Self::Monitor, Self::Rcon];
+
+    pub fn primary_index(self) -> Option<usize> {
+        Self::PRIMARY.iter().position(|tab| *tab == self)
     }
 
     pub fn from_index(index: usize) -> Self {
-        match index % 7 {
-            0 => Tab::Monitor,
-            1 => Tab::Hotspots,
-            2 => Tab::Heatmap,
-            3 => Tab::Clusters,
-            4 => Tab::Diagnostic,
-            5 => Tab::Spark,
-            6 => Tab::Rcon,
-            _ => Tab::Monitor,
-        }
-    }
-
-    pub fn to_index(self) -> usize {
-        self as usize
+        Self::PRIMARY[index % Self::PRIMARY.len()]
     }
 
     pub fn next(self) -> Self {
-        Self::from_index(self.to_index() + 1)
+        Self::from_index(self.primary_index().map_or(0, |index| index + 1))
     }
 
     pub fn prev(self) -> Self {
-        Self::from_index((self.to_index() + 6) % 7)
+        Self::from_index(self.primary_index().map_or(0, |index| {
+            (index + Self::PRIMARY.len() - 1) % Self::PRIMARY.len()
+        }))
     }
 }
 

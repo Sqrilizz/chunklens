@@ -113,16 +113,18 @@ impl ChunkMetrics {
     }
 
     pub fn severity_colored(&self) -> String {
-        if self.is_oversized {
-            return "\x1b[1;95mLARGE NBT\x1b[0m".to_string();
-        }
-        match self.score {
-            s if s >= 80.0 => "\x1b[1;91mSCORE 80+\x1b[0m".to_string(),
-            s if s >= 60.0 => "\x1b[1;93mSCORE 60+\x1b[0m".to_string(),
-            s if s >= 40.0 => "\x1b[93mSCORE 40+\x1b[0m".to_string(),
-            s if s >= 20.0 => "\x1b[92mSCORE 20+\x1b[0m".to_string(),
-            _ => "\x1b[90mSCORE <20\x1b[0m".to_string(),
-        }
+        let color = if self.is_oversized {
+            "1;95"
+        } else {
+            match self.score {
+                s if s >= 80.0 => "1;91",
+                s if s >= 60.0 => "1;93",
+                s if s >= 40.0 => "93",
+                s if s >= 20.0 => "92",
+                _ => "90",
+            }
+        };
+        format!("\x1b[{color}m{}\x1b[0m", self.severity())
     }
 
     pub fn culprits_summary(&self) -> String {

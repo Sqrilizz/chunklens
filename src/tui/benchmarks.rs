@@ -59,7 +59,7 @@ fn snapshot_dashboard() {
     std::fs::create_dir_all(&output).unwrap();
     let scan = ScanResult::read_json(&report).unwrap();
     let mut state = AppState::new(scan, None, None, None, None);
-    for (width, height) in [(80, 24), (120, 40), (180, 50)] {
+    for (width, height) in [(60, 18), (80, 24), (120, 40), (180, 50)] {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         for tab in [Tab::Hotspots, Tab::Heatmap, Tab::Diagnostic, Tab::Monitor] {
             state.active_tab = tab;
