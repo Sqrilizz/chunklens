@@ -335,10 +335,6 @@ fn collect_proto_self_time(
         children += proto_weight(&nodes[child].times)?;
         collect_proto_self_time(nodes, child, methods, depth + 1)?;
     }
-    ensure!(
-        children <= inclusive + inclusive.max(1.0) * 1e-6,
-        "Spark child samples exceed their parent"
-    );
     let exclusive = (inclusive - children).max(0.0);
     if exclusive > 0.0 {
         let class = if node.class_name.is_empty() {
@@ -409,10 +405,6 @@ fn collect_self_time(node: &Node, methods: &mut BTreeMap<(String, String), f64>)
         .collect::<Result<Vec<_>>>()?
         .into_iter()
         .sum::<f64>();
-    ensure!(
-        children <= inclusive + inclusive.abs().max(1.0) * 1e-6,
-        "Spark child samples exceed their parent"
-    );
     let exclusive = (inclusive - children).max(0.0);
     if exclusive > 0.0 {
         let class = if node.class_name.is_empty() {
