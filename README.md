@@ -52,7 +52,7 @@ The compiled binary will be located at `target/release/chunklens`.
 
 ### Quick Start (Interactive Menu)
 
-Run `chunklens` with no arguments to automatically detect local Minecraft servers or search the filesystem:
+Run `chunklens` with no arguments to automatically detect local Minecraft servers (Paper, Purpur, Leaf, Folia, Fabric, Forge, Pumpkin, etc.) or search the filesystem:
 
 ```bash
 chunklens

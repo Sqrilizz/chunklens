@@ -107,6 +107,9 @@ pub fn discover_servers_in_targets(targets: &[(PathBuf, usize)]) -> Result<Vec<S
             if entry.file_type().is_dir() {
                 if entry.path().join("server.properties").is_file()
                     || entry.path().join("eula.txt").is_file()
+                    || entry.path().join("pumpkin.toml").is_file()
+                    || entry.path().join("configuration.toml").is_file()
+                    || entry.path().join("config/configuration.toml").is_file()
                 {
                     paths.push(entry.path().to_path_buf());
                     it.skip_current_dir();
@@ -132,7 +135,12 @@ pub fn discover_servers_in_targets(targets: &[(PathBuf, usize)]) -> Result<Vec<S
 
 pub fn server_at(path: &Path) -> Result<Server> {
     let panel_meta = load_panel_servers();
-    if path.join("server.properties").is_file() || path.join("eula.txt").is_file() {
+    if path.join("server.properties").is_file()
+        || path.join("eula.txt").is_file()
+        || path.join("pumpkin.toml").is_file()
+        || path.join("configuration.toml").is_file()
+        || path.join("config/configuration.toml").is_file()
+    {
         let absolute = path.canonicalize()?;
         return read_server(&absolute, &panel_meta, &running_server_paths());
     }
@@ -210,6 +218,14 @@ fn find_listening_addrs(port: u16) -> Vec<std::net::SocketAddr> {
 }
 
 fn detect_software(path: &Path) -> Option<String> {
+    if path.join("pumpkin.toml").is_file()
+        || path.join("configuration.toml").is_file()
+        || path.join("config/configuration.toml").is_file()
+        || path.join("features.toml").is_file()
+        || path.join("pumpkin").is_file()
+    {
+        return Some("pumpkin".to_string());
+    }
     if path.join("config/leaf-global.yml").is_file() || path.join("leaf.yml").is_file() {
         return Some("leaf".to_string());
     }
@@ -251,6 +267,7 @@ fn detect_software(path: &Path) -> Option<String> {
     }
 
     let candidates = [
+        "pumpkin",
         "leaf",
         "gale",
         "folia",
@@ -407,14 +424,44 @@ fn read_server(
 ) -> Result<Server> {
     if !path.join("server.properties").is_file()
         && !path.join("eula.txt").is_file()
+        && !path.join("pumpkin.toml").is_file()
+        && !path.join("configuration.toml").is_file()
+        && !path.join("config/configuration.toml").is_file()
         && !path.join("world").is_dir()
     {
         anyhow::bail!("Not a minecraft server directory");
     }
     let properties = parse_properties(&path.join("server.properties")).unwrap_or_default();
+    let pumpkin_path = if path.join("pumpkin.toml").is_file() {
+        Some(path.join("pumpkin.toml"))
+    } else if path.join("configuration.toml").is_file() {
+        Some(path.join("configuration.toml"))
+    } else if path.join("config/configuration.toml").is_file() {
+        Some(path.join("config/configuration.toml"))
+    } else {
+        None
+    };
+
+    let pumpkin_config = pumpkin_path
+        .as_deref()
+        .map(parse_pumpkin_config)
+        .unwrap_or_default();
+
     let software = detect_software(path);
 
-    let port: Option<u16> = properties.get("server-port").and_then(|p| p.parse().ok());
+    let port: Option<u16> = properties
+        .get("server-port")
+        .and_then(|p| p.parse().ok())
+        .or_else(|| {
+            pumpkin_config
+                .get("address")
+                .or_else(|| pumpkin_config.get("server.address"))
+                .or_else(|| pumpkin_config.get("server_address"))
+                .or_else(|| pumpkin_config.get("port"))
+                .or_else(|| pumpkin_config.get("server_port"))
+                .or_else(|| pumpkin_config.get("server.port"))
+                .and_then(|a| extract_port_from_address(a))
+        });
 
     let dir_name = path
         .file_name()
@@ -449,7 +496,15 @@ fn read_server(
     };
 
     let mut online_players = None;
-    let mut max_players = None;
+    let mut max_players = properties
+        .get("max-players")
+        .and_then(|m| m.parse().ok())
+        .or_else(|| {
+            pumpkin_config
+                .get("max_players")
+                .or_else(|| pumpkin_config.get("server.max_players"))
+                .and_then(|m| m.parse().ok())
+        });
     let mut latency_ms = None;
     let mut live_motd = None;
 
@@ -476,18 +531,45 @@ fn read_server(
         }
     }
 
+    let level_name = properties
+        .get("level-name")
+        .cloned()
+        .or_else(|| {
+            pumpkin_config
+                .get("world.name")
+                .or_else(|| pumpkin_config.get("level_name"))
+                .or_else(|| pumpkin_config.get("world_name"))
+                .or_else(|| pumpkin_config.get("world.level_name"))
+                .cloned()
+        })
+        .or_else(|| {
+            if path.join("world").is_dir() {
+                Some("world".to_string())
+            } else {
+                None
+            }
+        });
+
+    let motd = live_motd
+        .or_else(|| properties.get("motd").cloned())
+        .or_else(|| {
+            pumpkin_config
+                .get("motd")
+                .or_else(|| pumpkin_config.get("server.motd"))
+                .cloned()
+        })
+        .or_else(|| {
+            panel_meta
+                .get(&uuid_key)
+                .and_then(|m| m.description.clone())
+        });
+
     Ok(Server {
         name,
         path: path.to_path_buf(),
-        motd: live_motd
-            .or_else(|| properties.get("motd").cloned())
-            .or_else(|| {
-                panel_meta
-                    .get(&uuid_key)
-                    .and_then(|m| m.description.clone())
-            }),
+        motd,
         port,
-        level_name: properties.get("level-name").cloned(),
+        level_name,
         software,
         running,
         online_players,
@@ -500,6 +582,11 @@ fn server_marker(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
     name == "server.properties"
         || name == "eula.txt"
+        || name == "pumpkin.toml"
+        || name == "configuration.toml"
+        || name == "features.toml"
+        || name == "pumpkin"
+        || name == "pumpkin-server"
         || (name.ends_with(".jar")
             && ["paper", "purpur", "leaf", "fabric", "spigot", "server"]
                 .iter()
@@ -562,6 +649,44 @@ fn parse_properties(path: &Path) -> Result<HashMap<String, String>> {
         .collect())
 }
 
+fn extract_port_from_address(addr: &str) -> Option<u16> {
+    let trimmed = addr.trim().trim_matches('"').trim_matches('\'');
+    if let Some((_, port_str)) = trimmed.rsplit_once(':') {
+        port_str.trim().parse::<u16>().ok()
+    } else {
+        trimmed.parse::<u16>().ok()
+    }
+}
+
+fn parse_pumpkin_config(path: &Path) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let Ok(content) = fs::read_to_string(path) else {
+        return map;
+    };
+    let mut section = String::new();
+    for line in content.lines() {
+        let trimmed = line.split('#').next().unwrap_or("").trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            section = trimmed[1..trimmed.len() - 1].trim().to_ascii_lowercase();
+            continue;
+        }
+        if let Some((k, v)) = trimmed.split_once('=') {
+            let key = k.trim().to_ascii_lowercase();
+            let val = v.trim().trim_matches('"').trim_matches('\'').to_string();
+            let full_key = if section.is_empty() {
+                key
+            } else {
+                format!("{section}.{key}")
+            };
+            map.insert(full_key, val);
+        }
+    }
+    map
+}
+
 fn directory_size(path: &Path) -> u64 {
     WalkDir::new(path)
         .into_iter()
@@ -583,14 +708,23 @@ fn running_server_paths() -> HashSet<PathBuf> {
             continue;
         }
         let proc_path = entry.path();
-        let is_java = fs::read_link(proc_path.join("exe"))
+        let is_server = fs::read_link(proc_path.join("exe"))
             .ok()
             .and_then(|exe| {
-                exe.file_name()
-                    .map(|name| name.to_string_lossy().starts_with("java"))
+                exe.file_name().map(|name| {
+                    let s = name.to_string_lossy().to_ascii_lowercase();
+                    s.starts_with("java") || s.contains("pumpkin")
+                })
             })
             .unwrap_or(false);
-        if !is_java {
+        let is_server = if !is_server {
+            fs::read_to_string(proc_path.join("cmdline"))
+                .map(|cmd| cmd.to_ascii_lowercase().contains("pumpkin"))
+                .unwrap_or(false)
+        } else {
+            true
+        };
+        if !is_server {
             continue;
         }
         if let Ok(cwd) = proc_path.join("cwd").canonicalize() {
@@ -693,5 +827,39 @@ mod tests {
         let server = read_server(temp.path(), &HashMap::new(), &running_server_paths()).unwrap();
         assert!(!server.running);
         assert!(server.online_players.is_none());
+    }
+
+    #[test]
+    fn discovers_pumpkin_server_from_pumpkin_toml() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        std::fs::write(
+            temp.path().join("pumpkin.toml"),
+            "address = \"0.0.0.0:25565\"\nmotd = \"Pumpkin Test\"\nmax_players = 30\n",
+        )
+        .expect("write pumpkin.toml");
+        let servers = discover_servers_in(&[temp.path().to_owned()], 2).expect("discover");
+        assert_eq!(servers.len(), 1);
+        let server = &servers[0];
+        assert_eq!(server.software.as_deref(), Some("pumpkin"));
+        assert_eq!(server.port, Some(25565));
+        assert_eq!(server.motd.as_deref(), Some("Pumpkin Test"));
+        assert_eq!(server.max_players, Some(30));
+    }
+
+    #[test]
+    fn discovers_pumpkin_server_from_configuration_toml() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        std::fs::create_dir_all(temp.path().join("config")).expect("config dir");
+        std::fs::write(
+            temp.path().join("config/configuration.toml"),
+            "[server]\naddress = \"127.0.0.1:25580\"\nmotd = \"Pumpkin Config Test\"\n",
+        )
+        .expect("write configuration.toml");
+        let servers = discover_servers_in(&[temp.path().to_owned()], 2).expect("discover");
+        assert_eq!(servers.len(), 1);
+        let server = &servers[0];
+        assert_eq!(server.software.as_deref(), Some("pumpkin"));
+        assert_eq!(server.port, Some(25580));
+        assert_eq!(server.motd.as_deref(), Some("Pumpkin Config Test"));
     }
 }
