@@ -23,7 +23,8 @@ use model::ScanResult;
 #[command(
     name = "chunklens",
     version,
-    about = "Fast, lightweight Minecraft Anvil world scanner & lag investigator"
+    about = "High-throughput Minecraft Anvil & Linear region scanner, split-screen TUI lag investigator, Spark correlator, and config auditor",
+    long_about = "High-throughput, read-only Minecraft Java Edition region scanner (.mca & .linear), split-screen lag investigator, Spark profile correlator, and server configuration doctor."
 )]
 struct Cli {
     /// World folder path to scan (defaults to ./world if present)

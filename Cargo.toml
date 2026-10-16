@@ -3,10 +3,10 @@ name = "chunklens"
 version = "0.1.0"
 edition = "2024"
 authors = ["Sqrilizz"]
-description = "Fast, lightweight Minecraft Anvil world scanner & lag investigator"
+description = "High-throughput Minecraft Anvil & Linear region scanner, split-screen TUI lag investigator, Spark correlator, and config auditor"
 repository = "https://github.com/Sqrilizz/chunklens"
 readme = "README.md"
-keywords = ["minecraft", "anvil", "nbt", "tui", "profiler"]
+keywords = ["minecraft", "anvil", "linear", "tui", "profiler"]
 categories = ["command-line-utilities"]
 
 [dependencies]
