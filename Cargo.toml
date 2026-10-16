@@ -1,6 +1,6 @@
 [package]
 name = "chunklens"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 authors = ["Sqrilizz"]
 description = "High-throughput Minecraft Anvil & Linear region scanner, split-screen TUI lag investigator, Spark correlator, and config auditor"
