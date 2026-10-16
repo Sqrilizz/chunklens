@@ -11,19 +11,33 @@ use ratatui::{
 
 use super::app::{AppState, Tab};
 
-// Professional Nordic/Catppuccin Palette
-const COLOR_PRIMARY: Color = Color::Rgb(99, 102, 241); // Indigo
-const COLOR_ACCENT: Color = Color::Rgb(168, 85, 247); // Purple
-const COLOR_SUCCESS: Color = Color::Rgb(52, 211, 153); // Emerald
-const COLOR_WARNING: Color = Color::Rgb(251, 191, 36); // Amber
-const COLOR_DANGER: Color = Color::Rgb(244, 63, 94); // Rose
-const COLOR_MUTED: Color = Color::Rgb(100, 116, 139); // Slate
-const COLOR_BORDER: Color = Color::Rgb(71, 85, 105); // Dark Slate
+// Industrial Terminal Palette (inspired by lazygit & btop)
+const COLOR_PRIMARY: Color = Color::Rgb(56, 189, 248); // Cyan 400 (Active focus / highlights)
+const COLOR_ACCENT: Color = Color::Rgb(14, 165, 233); // Sky 500
+const COLOR_SUCCESS: Color = Color::Rgb(34, 197, 94); // Green 500 (Healthy / Connected)
+const COLOR_WARNING: Color = Color::Rgb(245, 158, 11); // Amber 500 (Elevated load)
+const COLOR_DANGER: Color = Color::Rgb(239, 68, 68); // Red 500 (Critical load / Errors)
+const COLOR_MUTED: Color = Color::Rgb(148, 163, 184); // Slate 400 (Secondary text)
+const COLOR_BORDER: Color = Color::Rgb(71, 85, 105); // Slate 600 (Dim borders)
+const COLOR_BORDER_ACTIVE: Color = Color::Rgb(56, 189, 248); // Cyan 400 (Focused panel)
+const COLOR_SELECTION_BG: Color = Color::Rgb(30, 41, 59); // Slate 800 (Row selection)
+
+pub fn mini_progress_bar(ratio: f64, width: usize) -> String {
+    let filled = ((ratio * width as f64).round() as usize).min(width);
+    let empty = width.saturating_sub(filled);
+    format!("{}{}", "█".repeat(filled), "░".repeat(empty))
+}
 
 pub fn render(frame: &mut Frame, state: &mut AppState) {
     let size = frame.area();
     if size.width < 60 || size.height < 18 {
-        frame.render_widget(Paragraph::new("ChunkLens needs a terminal of at least 60 × 18.\nResize the window, or press Q to quit.").wrap(Wrap {trim:true}),size);
+        frame.render_widget(
+            Paragraph::new(
+                "ChunkLens needs a terminal of at least 60 × 18.\nResize the window, or press Q to quit.",
+            )
+            .wrap(Wrap { trim: true }),
+            size,
+        );
         return;
     }
 
@@ -62,51 +76,78 @@ fn render_header(frame: &mut Frame, state: &AppState, area: Rect) {
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("No report");
-    let (connection, color) = if state.server_host.is_empty() {
-        ("Offline analysis".to_owned(), COLOR_MUTED)
+
+    const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    let spinner = SPINNER_FRAMES[state.tick_count % SPINNER_FRAMES.len()];
+
+    let (conn_info, conn_color) = if state.server_host.is_empty() {
+        ("Offline analysis".to_string(), COLOR_MUTED)
     } else if state.monitor_error.is_some() {
-        ("Disconnected · last known values".to_owned(), COLOR_DANGER)
-    } else if let Some(ping) = &state.latest_ping {
         (
-            format!("{} · {}ms", state.server_host, ping.latency_ms),
+            format!("{} [Disconnected]", state.server_host),
+            COLOR_DANGER,
+        )
+    } else if let Some(ping) = &state.latest_ping {
+        let poll_ratio = (state.last_poll.elapsed().as_secs_f64()
+            / state.poll_interval.as_secs_f64())
+        .clamp(0.0, 1.0);
+        let poll_bar = mini_progress_bar(poll_ratio, 6);
+        let ping_state = if state.poll_pending {
+            format!("[{spinner} pinging]")
+        } else {
+            format!("[loop: {poll_bar}]")
+        };
+        (
+            format!(
+                "{} · {}ms · {}/{} online  {}",
+                state.server_host,
+                ping.latency_ms,
+                ping.online_players,
+                ping.max_players,
+                ping_state
+            ),
             COLOR_SUCCESS,
         )
     } else {
         (
-            format!("Connecting to {}", state.server_host),
+            format!("{spinner} Connecting to {}...", state.server_host),
             COLOR_WARNING,
         )
     };
+
     let spans = vec![
         Span::styled(
             " CHUNKLENS ",
             Style::default()
-                .fg(COLOR_PRIMARY)
+                .fg(Color::Black)
+                .bg(COLOR_PRIMARY)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!(
-                " {world} · {} / {} chunks  ",
+                "  {world} · {} / {} chunks  ",
                 state.scan.chunks.len(),
                 state.scan.total_chunks()
             ),
             Style::default().fg(Color::White),
         ),
-        Span::styled(connection, Style::default().fg(color)),
+        Span::styled("│ ", Style::default().fg(COLOR_BORDER)),
+        Span::styled(conn_info, Style::default().fg(conn_color)),
     ];
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn render_tabs(frame: &mut Frame, state: &AppState, area: Rect) {
-    let labels = ["1 Chunks", "2 Clusters", "3 Live", "4 Console"];
+    let labels = ["1: Chunks", "2: Clusters", "3: Live Monitor", "4: Console"];
     let mut spans = Vec::new();
     for (index, label) in labels.iter().enumerate() {
+        let is_active = state.active_tab.primary_index() == Some(index);
         spans.push(Span::styled(
             format!(" {label} "),
-            if state.active_tab.primary_index() == Some(index) {
+            if is_active {
                 Style::default()
-                    .fg(Color::White)
-                    .bg(COLOR_PRIMARY)
+                    .fg(Color::Black)
+                    .bg(Color::White)
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(COLOR_MUTED)
@@ -114,6 +155,24 @@ fn render_tabs(frame: &mut Frame, state: &AppState, area: Rect) {
         ));
         spans.push(Span::raw(" "));
     }
+
+    if state.active_tab == Tab::Hotspots {
+        spans.push(Span::styled(
+            "│  Filter: ",
+            Style::default().fg(COLOR_BORDER),
+        ));
+        spans.push(Span::styled(
+            format!(
+                "[f] {} ({})",
+                state.filter_category.label(),
+                state.filtered_chunk_indices.len()
+            ),
+            Style::default()
+                .fg(COLOR_ACCENT)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
     let advanced = match state.active_tab {
         Tab::Heatmap => Some("Heatmap"),
         Tab::Diagnostic => Some("Inspector"),
@@ -122,13 +181,663 @@ fn render_tabs(frame: &mut Frame, state: &AppState, area: Rect) {
     };
     if let Some(name) = advanced {
         spans.push(Span::styled(
-            format!("  {name}"),
+            "  │  View: ",
+            Style::default().fg(COLOR_BORDER),
+        ));
+        spans.push(Span::styled(
+            name,
             Style::default()
                 .fg(COLOR_ACCENT)
                 .add_modifier(Modifier::BOLD),
         ));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+pub struct ChunkDiagnosis {
+    pub tag: &'static str,
+    pub severity: &'static str,
+    pub severity_color: Color,
+    pub summary: String,
+}
+
+pub fn diagnose_chunk(c: &crate::model::ChunkMetrics) -> ChunkDiagnosis {
+    let redstone_total = c.redstone_wire + c.repeaters + c.comparators + c.observers + c.pistons;
+    if c.payload_size > 1_000_000 || c.shulkers > 50 {
+        ChunkDiagnosis {
+            tag: "[NBT-STASH]",
+            severity: "[CRIT]",
+            severity_color: COLOR_DANGER,
+            summary: format!(
+                "Oversized NBT payload ({:.1} MB, {} shulkers) — potential dupe stash or crash hazard",
+                c.payload_size as f64 / 1_048_576.0,
+                c.shulkers
+            ),
+        }
+    } else if c.villagers >= 30 {
+        ChunkDiagnosis {
+            tag: "[VILLAGER]",
+            severity: "[CRIT]",
+            severity_color: COLOR_DANGER,
+            summary: format!(
+                "Dense villager cluster ({} villagers) — heavy Brain AI pathfinding and POI scan cost",
+                c.villagers
+            ),
+        }
+    } else if c.hoppers >= 60 || c.hopper_minecarts >= 10 {
+        ChunkDiagnosis {
+            tag: "[HOPPERS]",
+            severity: if c.hoppers >= 100 { "[CRIT]" } else { "[WARN]" },
+            severity_color: if c.hoppers >= 100 {
+                COLOR_DANGER
+            } else {
+                COLOR_WARNING
+            },
+            summary: format!(
+                "High hopper density ({} hoppers, {} minecarts) — continuous inventory polling",
+                c.hoppers, c.hopper_minecarts
+            ),
+        }
+    } else if redstone_total >= 80 || c.comparators >= 25 {
+        ChunkDiagnosis {
+            tag: "[REDSTONE]",
+            severity: "[WARN]",
+            severity_color: COLOR_WARNING,
+            summary: format!(
+                "Active redstone clockwork ({} total components, {} comparators)",
+                redstone_total, c.comparators
+            ),
+        }
+    } else if c.dropped_items >= 50 || c.exp_orbs >= 40 {
+        ChunkDiagnosis {
+            tag: "[DROPPED]",
+            severity: "[WARN]",
+            severity_color: COLOR_WARNING,
+            summary: format!(
+                "Loose entity accumulation ({} items, {} XP orbs)",
+                c.dropped_items, c.exp_orbs
+            ),
+        }
+    } else if c.entity_count >= 50 {
+        ChunkDiagnosis {
+            tag: "[MOB-FARM]",
+            severity: "[WARN]",
+            severity_color: COLOR_WARNING,
+            summary: format!(
+                "Dense mob concentration ({} total entities)",
+                c.entity_count
+            ),
+        }
+    } else if c.score >= 50.0 {
+        ChunkDiagnosis {
+            tag: "[HEAVY]",
+            severity: "[WARN]",
+            severity_color: COLOR_WARNING,
+            summary: format!("High cumulative load score ({:.1} / 100)", c.score),
+        }
+    } else {
+        ChunkDiagnosis {
+            tag: "[NORMAL]",
+            severity: "[OK]",
+            severity_color: COLOR_SUCCESS,
+            summary: format!("Low load score ({:.1} / 100)", c.score),
+        }
+    }
+}
+
+fn spark_correlation_note(
+    c: &crate::model::ChunkMetrics,
+    spark: Option<&crate::protocol::spark::SparkProfileSummary>,
+) -> Option<String> {
+    let s = spark?;
+    let top = s.top_consumers.first()?;
+    let redstone_total = c.redstone_wire + c.repeaters + c.comparators + c.observers + c.pistons;
+    let short_class = top
+        .class_name
+        .split('.')
+        .next_back()
+        .unwrap_or(&top.class_name);
+
+    if c.villagers >= 20 && top.method_name.to_lowercase().contains("entity") {
+        Some(format!(
+            "Spark matches: {short_class}.{} ({:.1}%) aligns with {} villagers in this chunk",
+            top.method_name, top.percentage, c.villagers
+        ))
+    } else if c.hoppers >= 30
+        && (top.method_name.to_lowercase().contains("blockentity")
+            || top.method_name.to_lowercase().contains("hopper"))
+    {
+        Some(format!(
+            "Spark matches: {short_class}.{} ({:.1}%) aligns with {} hoppers in this chunk",
+            top.method_name, top.percentage, c.hoppers
+        ))
+    } else if redstone_total >= 40 && top.method_name.to_lowercase().contains("redstone") {
+        Some(format!(
+            "Spark matches: {short_class}.{} ({:.1}%) aligns with {} redstone components",
+            top.method_name, top.percentage, redstone_total
+        ))
+    } else {
+        Some(format!(
+            "Spark top consumer: {short_class}.{} ({:.1}% self-time)",
+            top.method_name, top.percentage
+        ))
+    }
+}
+
+fn render_hotspots(frame: &mut Frame, state: &mut AppState, area: Rect) {
+    if state.filtered_chunk_indices.is_empty() {
+        let message = if state.scan.total_chunks() == 0 {
+            "Open a world or report to inspect chunks.\n\nchunklens tui /path/to/world\nchunklens tui report.json.gz\n\nPress ? for keyboard shortcuts."
+        } else if !state.search_query.is_empty() {
+            "No matching chunks.\nPress / to change the search filter."
+        } else {
+            "No chunks meet the score threshold in this category.\nPress 'f' to change category or scan with --min-score 0."
+        };
+        frame.render_widget(
+            Paragraph::new(message).wrap(Wrap { trim: false }).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(COLOR_BORDER))
+                    .title(" Chunks "),
+            ),
+            area,
+        );
+        return;
+    }
+
+    let capacity = area.height.saturating_sub(3).max(1) as usize;
+    state.page_size = capacity;
+    let selected = state.table_state.selected().unwrap_or(0);
+    if selected < state.table_scroll {
+        state.table_scroll = selected;
+    }
+    if selected >= state.table_scroll + capacity {
+        state.table_scroll = selected + 1 - capacity;
+    }
+
+    if area.width >= 96 {
+        // Master-Detail Split View (lazygit / k9s style)
+        let split = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(45), // Left: Offenders list
+                Constraint::Percentage(55), // Right: Instant inspector
+            ])
+            .split(area);
+
+        render_offenders_split(frame, state, split[0], capacity, selected);
+        render_instant_inspector(frame, state, split[1]);
+    } else {
+        // Compact single-column view for narrow terminals (< 96 columns)
+        render_offenders_compact(frame, state, area, capacity, selected);
+    }
+}
+
+fn render_offenders_split(
+    frame: &mut Frame,
+    state: &mut AppState,
+    area: Rect,
+    capacity: usize,
+    selected: usize,
+) {
+    let header = Row::new([
+        Span::styled(
+            "#",
+            Style::default()
+                .fg(COLOR_PRIMARY)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "Chunk X,Z",
+            Style::default()
+                .fg(COLOR_PRIMARY)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "Score",
+            Style::default()
+                .fg(COLOR_PRIMARY)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "Tag",
+            Style::default()
+                .fg(COLOR_PRIMARY)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "Offense",
+            Style::default()
+                .fg(COLOR_PRIMARY)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])
+    .height(1);
+
+    let rows: Vec<Row> = state
+        .filtered_chunk_indices
+        .iter()
+        .enumerate()
+        .skip(state.table_scroll)
+        .take(capacity)
+        .map(|(rank, &index)| {
+            let c = &state.scan.chunks[index];
+            let diag = diagnose_chunk(c);
+            let is_selected = rank == selected;
+            let rank_str = format!("{:<3}", rank + 1);
+            let coord_str = format!("{}, {}", c.chunk_x, c.chunk_z);
+            let score_str = format!("{:>5.1}", c.score);
+            let offense_str = c.culprits_summary();
+
+            Row::new(vec![
+                Span::styled(
+                    rank_str,
+                    if is_selected {
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(COLOR_MUTED)
+                    },
+                ),
+                Span::styled(
+                    coord_str,
+                    if is_selected {
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::White)
+                    },
+                ),
+                Span::styled(score_str, score_to_style(c.score)),
+                Span::styled(
+                    diag.tag,
+                    Style::default()
+                        .fg(diag.severity_color)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    offense_str,
+                    if is_selected {
+                        Style::default().fg(Color::White)
+                    } else {
+                        Style::default().fg(COLOR_MUTED)
+                    },
+                ),
+            ])
+        })
+        .collect();
+
+    let title = format!(
+        " [1: Top Offenders · {} matches] ",
+        state.filtered_chunk_indices.len()
+    );
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(4),
+            Constraint::Length(12),
+            Constraint::Length(7),
+            Constraint::Length(13),
+            Constraint::Min(10),
+        ],
+    )
+    .header(header)
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(COLOR_BORDER_ACTIVE))
+            .title(Span::styled(
+                title,
+                Style::default()
+                    .fg(COLOR_PRIMARY)
+                    .add_modifier(Modifier::BOLD),
+            )),
+    )
+    .row_highlight_style(
+        Style::default()
+            .bg(COLOR_SELECTION_BG)
+            .add_modifier(Modifier::BOLD),
+    )
+    .highlight_symbol("> ");
+
+    let mut local_state = ratatui::widgets::TableState::default();
+    local_state.select(Some(selected.saturating_sub(state.table_scroll)));
+    frame.render_stateful_widget(table, area, &mut local_state);
+}
+
+fn render_instant_inspector(frame: &mut Frame, state: &AppState, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(COLOR_BORDER));
+
+    if let Some(c) = state.selected_chunk() {
+        let diag = diagnose_chunk(c);
+        let title = format!(" [2: Inspector · Chunk {}, {}] ", c.chunk_x, c.chunk_z);
+        let block = block.title(Span::styled(
+            title,
+            Style::default()
+                .fg(COLOR_ACCENT)
+                .add_modifier(Modifier::BOLD),
+        ));
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        let layout = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(2), // Location & Score Meta
+                Constraint::Length(2), // Diagnosis Banner
+                Constraint::Min(6),    // Entity & Block Breakdown
+                Constraint::Length(2), // Spark Correlation
+                Constraint::Length(1), // Actions Strip
+            ])
+            .split(inner);
+
+        // 1. Location & Meta
+        let meta_line = Line::from(vec![
+            Span::styled("Block: ", Style::default().fg(COLOR_MUTED)),
+            Span::styled(
+                format!("[{}, ~ , {}]", c.block_x(), c.block_z()),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  │  Dim: ", Style::default().fg(COLOR_MUTED)),
+            Span::styled(short_dim(&c.dimension), Style::default().fg(Color::White)),
+            Span::styled("  │  Score: ", Style::default().fg(COLOR_MUTED)),
+            Span::styled(
+                format!("{:.1} / 100", c.score),
+                score_to_style(c.score).add_modifier(Modifier::BOLD),
+            ),
+        ]);
+        frame.render_widget(Paragraph::new(meta_line), layout[0]);
+
+        // 2. Diagnosis Banner
+        let diag_line = Line::from(vec![
+            Span::styled(
+                format!(" {} ", diag.severity),
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(diag.severity_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                diag.tag,
+                Style::default()
+                    .fg(diag.severity_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" "),
+            Span::styled(&diag.summary, Style::default().fg(Color::White)),
+        ]);
+        frame.render_widget(
+            Paragraph::new(diag_line).wrap(Wrap { trim: true }),
+            layout[1],
+        );
+
+        // 3. Entity & Block Breakdown (2 side-by-side columns)
+        let breakdown_split = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(layout[2]);
+
+        // Left Breakdown: Entities
+        let mut ent_lines = vec![
+            Line::from(Span::styled(
+                format!("Entities ({})", c.entity_count),
+                Style::default()
+                    .fg(COLOR_PRIMARY)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from("─────────────────────────────"),
+        ];
+        let mut sorted_ent: Vec<_> = c.entity_types.iter().collect();
+        sorted_ent.sort_by(|a, b| b.1.cmp(a.1));
+        if sorted_ent.is_empty() {
+            ent_lines.push(Line::from(Span::styled(
+                "None",
+                Style::default().fg(COLOR_MUTED),
+            )));
+        } else {
+            for (name, count) in sorted_ent.into_iter().take(6) {
+                let clean = name.strip_prefix("minecraft:").unwrap_or(name);
+                ent_lines.push(Line::from(vec![
+                    Span::styled(format!(" {:<16}", clean), Style::default().fg(Color::White)),
+                    Span::styled(format!("{:>5}", count), Style::default().fg(COLOR_WARNING)),
+                ]));
+            }
+        }
+        frame.render_widget(Paragraph::new(ent_lines), breakdown_split[0]);
+
+        // Right Breakdown: Tile Entities & Redstone
+        let redstone_total =
+            c.redstone_wire + c.repeaters + c.comparators + c.observers + c.pistons;
+        let block_lines = vec![
+            Line::from(Span::styled(
+                format!(
+                    "Blocks & Redstone ({})",
+                    c.block_entity_count + redstone_total
+                ),
+                Style::default()
+                    .fg(COLOR_PRIMARY)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from("─────────────────────────────"),
+            Line::from(vec![
+                Span::styled(" Hoppers:        ", Style::default().fg(Color::White)),
+                Span::styled(
+                    format!("{:>5}", c.hoppers),
+                    Style::default().fg(if c.hoppers > 30 {
+                        COLOR_DANGER
+                    } else {
+                        COLOR_WARNING
+                    }),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(" Chests:         ", Style::default().fg(Color::White)),
+                Span::styled(format!("{:>5}", c.chests), Style::default().fg(COLOR_MUTED)),
+            ]),
+            Line::from(vec![
+                Span::styled(" Shulker Boxes:  ", Style::default().fg(Color::White)),
+                Span::styled(
+                    format!("{:>5}", c.shulkers),
+                    Style::default().fg(if c.shulkers > 20 {
+                        COLOR_DANGER
+                    } else {
+                        COLOR_MUTED
+                    }),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(" Redstone Dust:  ", Style::default().fg(Color::White)),
+                Span::styled(
+                    format!("{:>5}", c.redstone_wire),
+                    Style::default().fg(COLOR_MUTED),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(" Comparators:    ", Style::default().fg(Color::White)),
+                Span::styled(
+                    format!("{:>5}", c.comparators),
+                    Style::default().fg(if c.comparators > 10 {
+                        COLOR_WARNING
+                    } else {
+                        COLOR_MUTED
+                    }),
+                ),
+            ]),
+        ];
+        frame.render_widget(Paragraph::new(block_lines), breakdown_split[1]);
+
+        // 4. Spark Correlation
+        let spark_text = if let Some(note) = spark_correlation_note(c, state.spark_summary.as_ref())
+        {
+            Line::from(vec![
+                Span::styled(
+                    "SPARK: ",
+                    Style::default()
+                        .fg(COLOR_ACCENT)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(note, Style::default().fg(Color::White)),
+            ])
+        } else {
+            Line::from(Span::styled(
+                "SPARK: Profile not loaded (use --spark profile.json)",
+                Style::default().fg(COLOR_MUTED),
+            ))
+        };
+        frame.render_widget(Paragraph::new(spark_text), layout[3]);
+
+        // 5. Actions Strip
+        let actions = Line::from(vec![
+            Span::styled("Actions: ", Style::default().fg(COLOR_MUTED)),
+            Span::styled(
+                "[y/c] ",
+                Style::default()
+                    .fg(COLOR_SUCCESS)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("Copy /tp  │ ", Style::default().fg(COLOR_MUTED)),
+            Span::styled(
+                "[x/p] ",
+                Style::default()
+                    .fg(COLOR_DANGER)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("Copy /kill  │ ", Style::default().fg(COLOR_MUTED)),
+            Span::styled(
+                "[Enter] ",
+                Style::default()
+                    .fg(COLOR_ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("Fullscreen Inspector", Style::default().fg(COLOR_MUTED)),
+        ]);
+        frame.render_widget(Paragraph::new(actions), layout[4]);
+    } else {
+        frame.render_widget(
+            Paragraph::new("No chunk selected")
+                .style(Style::default().fg(COLOR_MUTED))
+                .block(block),
+            area,
+        );
+    }
+}
+
+fn render_offenders_compact(
+    frame: &mut Frame,
+    state: &mut AppState,
+    area: Rect,
+    capacity: usize,
+    selected: usize,
+) {
+    let visible_columns: &[usize] = if area.width >= 80 {
+        &[0, 2, 3, 4, 5, 6, 7, 8]
+    } else {
+        &[2, 4, 5, 6, 7, 8]
+    };
+    let headings = [
+        "#",
+        "Dim",
+        "Chunk X,Z",
+        "Block X,Z",
+        "Score",
+        "Ent",
+        "Vil",
+        "Hop",
+        "Red",
+        "Signals",
+    ];
+    let widths = [4, 10, 14, 15, 7, 6, 6, 6, 7, 15];
+    let header = Row::new(visible_columns.iter().map(|&i| {
+        Span::styled(
+            headings[i],
+            Style::default()
+                .fg(COLOR_PRIMARY)
+                .add_modifier(Modifier::BOLD),
+        )
+    }));
+    let rows: Vec<Row> = state
+        .filtered_chunk_indices
+        .iter()
+        .enumerate()
+        .skip(state.table_scroll)
+        .take(capacity)
+        .map(|(rank, &index)| {
+            let c = &state.scan.chunks[index];
+            let values = [
+                format!("{}", rank + 1),
+                short_dim(&c.dimension),
+                format!("{}, {}", c.chunk_x, c.chunk_z),
+                format!("{}, {}", c.block_x(), c.block_z()),
+                format!("{:.1}", c.score),
+                c.entity_count.to_string(),
+                c.villagers.to_string(),
+                c.hoppers.to_string(),
+                (c.redstone_wire + c.repeaters + c.comparators + c.observers + c.pistons)
+                    .to_string(),
+                c.culprits_summary(),
+            ];
+            Row::new(
+                visible_columns
+                    .iter()
+                    .map(|&i| {
+                        Span::styled(
+                            values[i].clone(),
+                            if i == 4 {
+                                score_to_style(c.score)
+                            } else {
+                                Style::default().fg(Color::White)
+                            },
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+
+    let title = format!(
+        " Chunks · {} matches · {} score 80+ ",
+        state.filtered_chunk_indices.len(),
+        state.high_score_chunks
+    );
+    let table = Table::new(
+        rows,
+        visible_columns.iter().map(|&i| {
+            if i == 9 {
+                Constraint::Min(widths[i])
+            } else {
+                Constraint::Length(widths[i])
+            }
+        }),
+    )
+    .header(header)
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(COLOR_BORDER))
+            .title(title),
+    )
+    .row_highlight_style(
+        Style::default()
+            .bg(COLOR_SELECTION_BG)
+            .add_modifier(Modifier::BOLD),
+    )
+    .highlight_symbol("> ");
+
+    let mut local_state = ratatui::widgets::TableState::default();
+    local_state.select(Some(selected.saturating_sub(state.table_scroll)));
+    frame.render_stateful_widget(table, area, &mut local_state);
 }
 
 fn render_monitor(frame: &mut Frame, state: &AppState, area: Rect) {
@@ -292,12 +1001,28 @@ fn render_monitor(frame: &mut Frame, state: &AppState, area: Rect) {
         .constraints([Constraint::Length(1), Constraint::Min(2)])
         .split(inner_spark);
 
+    let poll_ratio = (state.last_poll.elapsed().as_secs_f64() / state.poll_interval.as_secs_f64())
+        .clamp(0.0, 1.0);
+    let poll_bar = mini_progress_bar(poll_ratio, 6);
+    let poll_label = if state.poll_pending {
+        "syncing...".to_string()
+    } else {
+        format!(
+            "{poll_bar} {:.1}s",
+            state
+                .last_poll
+                .elapsed()
+                .as_secs_f64()
+                .min(state.poll_interval.as_secs_f64())
+        )
+    };
+
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("Avg: ", Style::default().fg(COLOR_MUTED)),
             Span::styled(format!("{avg_lat}ms"), Style::default().fg(COLOR_SUCCESS)),
-            Span::styled("  │ Polling: ", Style::default().fg(COLOR_MUTED)),
-            Span::styled("every 3s", Style::default().fg(COLOR_MUTED)),
+            Span::styled("  │ Poll: ", Style::default().fg(COLOR_MUTED)),
+            Span::styled(poll_label, Style::default().fg(COLOR_PRIMARY)),
         ])),
         spark_layout[0],
     );
@@ -335,129 +1060,6 @@ fn render_monitor(frame: &mut Frame, state: &AppState, area: Rect) {
             )),
     );
     frame.render_widget(event_list, layout[1]);
-}
-
-fn render_hotspots(frame: &mut Frame, state: &mut AppState, area: Rect) {
-    if state.filtered_chunk_indices.is_empty() {
-        let message = if state.scan.total_chunks() == 0 {
-            "Open a world or report to inspect chunks.\n\nchunklens tui /path/to/world\nchunklens tui report.json.gz\n\nPress ? for keyboard shortcuts."
-        } else if !state.search_query.is_empty() {
-            "No matching chunks.\nPress / to change the filter."
-        } else {
-            "No chunks meet the score threshold.\nScan with --min-score 0 to retain every chunk."
-        };
-        frame.render_widget(
-            Paragraph::new(message)
-                .wrap(Wrap { trim: false })
-                .block(Block::default().borders(Borders::ALL).title(" Chunks ")),
-            area,
-        );
-        return;
-    }
-    let capacity = area.height.saturating_sub(3).max(1) as usize;
-    state.page_size = capacity;
-    let selected = state.table_state.selected().unwrap_or(0);
-    if selected < state.table_scroll {
-        state.table_scroll = selected;
-    }
-    if selected >= state.table_scroll + capacity {
-        state.table_scroll = selected + 1 - capacity;
-    }
-    let visible_columns: &[usize] = if area.width >= 110 {
-        &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-    } else if area.width >= 80 {
-        &[0, 2, 3, 4, 5, 6, 7, 8]
-    } else {
-        &[2, 4, 5, 6, 7, 8]
-    };
-    let headings = [
-        "#",
-        "Dim",
-        "Chunk X,Z",
-        "Block X,Z",
-        "Score",
-        "Ent",
-        "Vil",
-        "Hop",
-        "Red",
-        "Signals",
-    ];
-    let widths = [4, 10, 14, 15, 7, 6, 6, 6, 7, 15];
-    let header = Row::new(
-        visible_columns
-            .iter()
-            .map(|&i| Span::styled(headings[i], Style::default().fg(COLOR_PRIMARY))),
-    );
-    let rows: Vec<Row> = state
-        .filtered_chunk_indices
-        .iter()
-        .enumerate()
-        .skip(state.table_scroll)
-        .take(capacity)
-        .map(|(rank, &index)| {
-            let c = &state.scan.chunks[index];
-            let values = [
-                format!("{}", rank + 1),
-                short_dim(&c.dimension),
-                format!("{}, {}", c.chunk_x, c.chunk_z),
-                format!("{}, {}", c.block_x(), c.block_z()),
-                format!("{:.1}", c.score),
-                c.entity_count.to_string(),
-                c.villagers.to_string(),
-                c.hoppers.to_string(),
-                (c.redstone_wire + c.repeaters + c.comparators + c.observers + c.pistons)
-                    .to_string(),
-                c.culprits_summary(),
-            ];
-            Row::new(
-                visible_columns
-                    .iter()
-                    .map(|&i| {
-                        Span::styled(
-                            values[i].clone(),
-                            if i == 4 {
-                                score_to_style(c.score)
-                            } else {
-                                Style::default().fg(Color::White)
-                            },
-                        )
-                    })
-                    .collect::<Vec<_>>(),
-            )
-        })
-        .collect();
-    let title = format!(
-        " Chunks · {} matches · {} score 80+ ",
-        state.filtered_chunk_indices.len(),
-        state.high_score_chunks
-    );
-    let table = Table::new(
-        rows,
-        visible_columns.iter().map(|&i| {
-            if i == 9 {
-                Constraint::Min(widths[i])
-            } else {
-                Constraint::Length(widths[i])
-            }
-        }),
-    )
-    .header(header)
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(COLOR_BORDER))
-            .title(title),
-    )
-    .row_highlight_style(
-        Style::default()
-            .bg(Color::Rgb(49, 46, 129))
-            .add_modifier(Modifier::BOLD),
-    )
-    .highlight_symbol("› ");
-    let mut local_state = ratatui::widgets::TableState::default();
-    local_state.select(Some(selected.saturating_sub(state.table_scroll)));
-    frame.render_stateful_widget(table, area, &mut local_state);
 }
 
 fn render_heatmap(frame: &mut Frame, state: &AppState, area: Rect) {
@@ -589,7 +1191,7 @@ fn render_clusters(frame: &mut Frame, state: &mut AppState, area: Rect) {
         )
         .highlight_style(
             Style::default()
-                .bg(Color::Rgb(49, 46, 129))
+                .bg(COLOR_SELECTION_BG)
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol(">> ");
@@ -815,7 +1417,10 @@ fn render_diagnostic(frame: &mut Frame, state: &AppState, area: Rect) {
                         .fg(COLOR_SUCCESS)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled("  [Press 'C' to copy]", Style::default().fg(COLOR_MUTED)),
+                Span::styled(
+                    "  [Press 'Y' or 'C' to copy]",
+                    Style::default().fg(COLOR_MUTED),
+                ),
             ]),
             Line::from(vec![
                 Span::styled("Severity:  ", Style::default().fg(COLOR_MUTED)),
@@ -1098,55 +1703,57 @@ fn render_spark(frame: &mut Frame, state: &AppState, area: Rect) {
                 ),
                 Span::styled(
                     if s.average_mspt.is_some() {
-                        " (measured, last minute)"
+                        " (Target: <= 50.0 ms for 20 TPS)"
                     } else {
-                        " (timing data required)"
+                        ""
                     },
-                    Style::default().fg(mspt_col),
+                    Style::default().fg(COLOR_MUTED),
                 ),
             ]),
         ];
         frame.render_widget(Paragraph::new(meta), layout[0]);
 
-        // Category breakdown
-        let breakdown = vec![
-            Line::from(Span::styled(
-                "Self Sample Share by Category:",
-                Style::default()
-                    .fg(COLOR_PRIMARY)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from(vec![
-                Span::styled("Entities: ", Style::default().fg(COLOR_MUTED)),
-                Span::styled(
-                    format!("{:.1}%  ", s.category_breakdown.entities_pct),
-                    Style::default().fg(COLOR_WARNING),
-                ),
-                Span::styled("Tile Entities: ", Style::default().fg(COLOR_MUTED)),
-                Span::styled(
-                    format!("{:.1}%  ", s.category_breakdown.tile_entities_pct),
-                    Style::default().fg(COLOR_WARNING),
-                ),
-                Span::styled("Redstone: ", Style::default().fg(COLOR_MUTED)),
-                Span::styled(
-                    format!("{:.1}%  ", s.category_breakdown.redstone_pct),
-                    Style::default().fg(COLOR_WARNING),
-                ),
-                Span::styled("Chunks: ", Style::default().fg(COLOR_MUTED)),
-                Span::styled(
-                    format!("{:.1}%  ", s.category_breakdown.chunk_loading_pct),
-                    Style::default().fg(COLOR_WARNING),
-                ),
-                Span::styled("Other: ", Style::default().fg(COLOR_MUTED)),
-                Span::styled(
-                    format!("{:.1}%", s.category_breakdown.other_pct),
-                    Style::default().fg(COLOR_WARNING),
-                ),
-            ]),
-        ];
-        frame.render_widget(Paragraph::new(breakdown), layout[1]);
+        // Categories
+        let cb = &s.category_breakdown;
+        let cat_line = Line::from(vec![
+            Span::styled("Entities: ", Style::default().fg(COLOR_MUTED)),
+            Span::styled(
+                format!("{:.1}%  ", cb.entities_pct),
+                if cb.entities_pct > 30.0 {
+                    COLOR_DANGER
+                } else {
+                    COLOR_PRIMARY
+                },
+            ),
+            Span::styled("Tile Entities: ", Style::default().fg(COLOR_MUTED)),
+            Span::styled(
+                format!("{:.1}%  ", cb.tile_entities_pct),
+                if cb.tile_entities_pct > 25.0 {
+                    COLOR_DANGER
+                } else {
+                    COLOR_PRIMARY
+                },
+            ),
+            Span::styled("Redstone: ", Style::default().fg(COLOR_MUTED)),
+            Span::styled(
+                format!("{:.1}%  ", cb.redstone_pct),
+                if cb.redstone_pct > 15.0 {
+                    COLOR_DANGER
+                } else {
+                    COLOR_PRIMARY
+                },
+            ),
+            Span::styled("Chunk Load: ", Style::default().fg(COLOR_MUTED)),
+            Span::styled(format!("{:.1}%  ", cb.chunk_loading_pct), COLOR_MUTED),
+            Span::styled("Plugins: ", Style::default().fg(COLOR_MUTED)),
+            Span::styled(format!("{:.1}%", cb.plugins_pct), COLOR_MUTED),
+        ]);
+        frame.render_widget(
+            Paragraph::new(vec![Line::from("Category Share:"), cat_line]),
+            layout[1],
+        );
 
-        // Top Methods Table
+        // Top Methods
         let header = Row::new([
             Span::styled(
                 " # ",
@@ -1306,17 +1913,26 @@ fn render_rcon(frame: &mut Frame, state: &AppState, area: Rect) {
 }
 
 fn render_footer(frame: &mut Frame, state: &AppState, area: Rect) {
+    const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    let spinner = SPINNER_FRAMES[state.tick_count % SPINNER_FRAMES.len()];
+
     let text = if state.is_searching {
         format!(" /{}█  ·  Enter apply · Esc cancel", state.search_query)
     } else if let Some((message, _)) = &state.notification {
         format!(" {message}")
+    } else if state.rcon_pending {
+        format!(" {spinner} Executing RCON command in background...")
+    } else if state.poll_pending && state.latest_ping.is_none() {
+        format!(" {spinner} Connecting to {}...", state.server_host)
     } else {
         let shortcuts = match state.active_tab {
             Tab::Rcon => "Enter send · ↑↓ history · Tab switch · F1 help · Ctrl-C quit",
             Tab::Heatmap => "Arrows pan · +/- zoom · Esc chunks · ? help · Q quit",
             Tab::Monitor => "R refresh · S Spark · Tab switch · ? help · Q quit",
             Tab::Diagnostic | Tab::Spark => "Esc chunks · Tab switch · ? help · Q quit",
-            _ => "↑↓ move · Enter inspect · / find · C copy · H map · S Spark · ? keys · Q quit",
+            _ => {
+                "j/k move · f filter · y/c copy tp · x/p copy kill · / search · 1-4 tab · ? help · q quit"
+            }
         };
         if state.search_query.is_empty() {
             format!(" {shortcuts}")
@@ -1331,16 +1947,16 @@ fn render_footer(frame: &mut Frame, state: &AppState, area: Rect) {
 }
 
 fn render_help(frame: &mut Frame, area: Rect) {
-    let popup = centered_rect(90, 90, area);
+    let popup = centered_rect(84, 84, area);
     frame.render_widget(Clear, popup);
-    let text = "1 Chunks · 2 Clusters · 3 Live · 4 Console\nTab / Shift-Tab  Switch main view\n↑↓ or J/K         Select row\nPgUp / PgDn       Move a page\nEnter or D        Inspect selected chunk\n/                 Filter dimension, coords, score\nC                 Copy teleport command\nH                 Open heatmap\nS                 Open Spark report\nR                 Refresh live status\nEsc               Back to chunks; quit from chunks\nQ or Ctrl-C       Quit\n\nScores are offline estimates, not live MSPT.";
+    let text = "NAVIGATION & VIEWS:\n  1 Chunks · 2 Clusters · 3 Live Monitor · 4 Console\n  Tab / Shift-Tab    Cycle primary views\n  ↑/↓ or J/K         Navigate rows / offenders\n  PgUp / PgDn        Scroll table page\n  Enter or D         Open deep diagnostic inspector\n  /                  Instant search (coords, dimension, score)\n  F                  Cycle category filter (All, Mobs, Hoppers, Redstone, NBT)\n  Esc                Back to chunks; quit from chunks\n  Q or Ctrl-C        Quit\n\nACTIONS & TOOLS:\n  Y or C             Copy teleport command (/tp @s X ~ Z) to clipboard\n  X or P             Copy targeted /kill command for current chunk\n  H                  Open 2D potential load heatmap\n  S                  Open Spark profiler report\n  R                  Refresh live ping & RCON status\n\nScores are offline potential load estimates derived from entity and tile entity heuristics.";
     frame.render_widget(
         Paragraph::new(text).wrap(Wrap { trim: false }).block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(COLOR_PRIMARY))
-                .title(" ChunkLens help "),
+                .title(" ChunkLens Help & Shortcuts "),
         ),
         popup,
     );
@@ -1453,5 +2069,84 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(text.contains("99999, 0"));
+    }
+    #[test]
+    fn test_diagnose_chunk_heuristics() {
+        let vil_chunk = ChunkMetrics {
+            villagers: 50,
+            score: 75.0,
+            ..Default::default()
+        };
+        let d1 = diagnose_chunk(&vil_chunk);
+        assert_eq!(d1.tag, "[VILLAGER]");
+        assert_eq!(d1.severity, "[CRIT]");
+
+        let nbt_chunk = ChunkMetrics {
+            payload_size: 2_000_000,
+            shulkers: 60,
+            ..Default::default()
+        };
+        let d2 = diagnose_chunk(&nbt_chunk);
+        assert_eq!(d2.tag, "[NBT-STASH]");
+
+        let hop_chunk = ChunkMetrics {
+            hoppers: 120,
+            ..Default::default()
+        };
+        let d3 = diagnose_chunk(&hop_chunk);
+        assert_eq!(d3.tag, "[HOPPERS]");
+    }
+    #[test]
+    fn test_render_split_preview() {
+        let mut types = std::collections::BTreeMap::new();
+        types.insert("minecraft:villager".to_string(), 142);
+        types.insert("minecraft:iron_golem".to_string(), 4);
+        let scan = ScanResult {
+            chunks: vec![
+                ChunkMetrics {
+                    dimension: "minecraft:overworld".into(),
+                    chunk_x: 14,
+                    chunk_z: -8,
+                    villagers: 142,
+                    entity_count: 146,
+                    hoppers: 88,
+                    chests: 34,
+                    comparators: 12,
+                    repeaters: 8,
+                    observers: 4,
+                    score: 94.2,
+                    entity_types: types,
+                    ..Default::default()
+                },
+                ChunkMetrics {
+                    dimension: "minecraft:overworld".into(),
+                    chunk_x: -3,
+                    chunk_z: 41,
+                    score: 82.0,
+                    payload_size: 1_800_000,
+                    shulkers: 340,
+                    ..Default::default()
+                },
+            ],
+            world: "world".into(),
+            ..Default::default()
+        };
+        let mut app = AppState::new(scan, Some("play.example.com".into()), None, None, None);
+        app.latest_ping = Some(crate::protocol::slp::ServerPingResponse {
+            latency_ms: 18,
+            online_players: 34,
+            max_players: 50,
+            version_name: "Paper 1.21.1".into(),
+            protocol_version: 767,
+            description_clean: "Survival SMP".into(),
+            raw_json: String::new(),
+        });
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        for y in 0..24 {
+            let row: String = (0..120).map(|x| buffer[(x, y)].symbol()).collect();
+            println!("{}", row);
+        }
     }
 }

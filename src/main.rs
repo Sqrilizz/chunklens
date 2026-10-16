@@ -1,5 +1,6 @@
 mod analysis;
 mod discovery;
+pub mod live;
 mod model;
 mod nbt;
 pub mod protocol;
@@ -78,8 +79,10 @@ enum Command {
         host: Option<String>,
         #[arg(long)]
         spark: Option<PathBuf>,
-        #[arg(long)]
-        rcon_address: Option<std::net::SocketAddr>,
+        #[arg(long, visible_alias = "rcon")]
+        rcon: Option<String>,
+        #[arg(short, long, env = "CHUNKLENS_RCON_PASSWORD", hide_env_values = true)]
+        password: Option<String>,
     },
     /// Launch real-time live server monitoring TUI with latency sparklines & player load
     Watch {
@@ -147,8 +150,56 @@ enum Command {
         #[arg(short = 's', long, value_name = "CATEGORY")]
         sort: Option<String>,
     },
+    /// Purge lag-causing entities in a specific chunk remotely via RCON
+    Purge {
+        /// Chunk X coordinate
+        x: i32,
+        /// Chunk Z coordinate
+        z: i32,
+        /// Target entity type to purge (item, minecart, tnt, or all)
+        #[arg(short = 't', long, default_value = "item")]
+        entity_type: String,
+        /// Dimension (overworld, the_nether, the_end)
+        #[arg(short = 'd', long, default_value = "overworld")]
+        dimension: String,
+        /// Server address host:port (defaults to port 25575)
+        #[arg(long)]
+        rcon: Option<String>,
+        /// RCON password
+        #[arg(short, long, env = "CHUNKLENS_RCON_PASSWORD", hide_env_values = true)]
+        password: Option<String>,
+    },
     /// Discover installed Minecraft servers
     Servers,
+    /// Real-time lag & spike sentinel: monitors region files and correlates with RCON player positions
+    Live {
+        /// World folder to watch (defaults to ./world or detects server world)
+        world: Option<PathBuf>,
+        /// RCON address host:port (defaults to port 25575)
+        #[arg(long)]
+        rcon: Option<String>,
+        /// RCON password
+        #[arg(short, long, env = "CHUNKLENS_RCON_PASSWORD", hide_env_values = true)]
+        password: Option<String>,
+        /// Minimum score delta to trigger alert (default: 15.0)
+        #[arg(long, default_value_t = 15.0)]
+        spike_score: f64,
+        /// Minimum entity increase to trigger alert (default: 40)
+        #[arg(long, default_value_t = 40)]
+        spike_entities: u64,
+        /// Minimum hopper increase to trigger alert (default: 20)
+        #[arg(long, default_value_t = 20)]
+        spike_hoppers: u64,
+        /// Minimum NBT payload growth in KiB to trigger alert (default: 150)
+        #[arg(long, default_value_t = 150)]
+        spike_payload_kb: u64,
+        /// Server MSPT threshold in ms to trigger auto-flush (default: 45.0)
+        #[arg(long, default_value_t = 45.0)]
+        mspt_threshold: f64,
+        /// Disable automatic '/save-all flush' via RCON on MSPT spikes
+        #[arg(long)]
+        no_flush: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -179,12 +230,20 @@ fn main() -> Result<()> {
                 target,
                 host,
                 spark,
-                rcon_address,
+                rcon,
+                password,
             } => {
-                launch_unified_tui(target, host, spark, rcon_address)?;
+                let rcon_addr = if let Some(addr_str) = rcon {
+                    let (_, socket_addr) = protocol::slp::resolve_server(&addr_str, 25575, false)?;
+                    Some(socket_addr)
+                } else {
+                    None
+                };
+                let rcon_pwd = password.or_else(|| std::env::var("CHUNKLENS_RCON_PASSWORD").ok());
+                launch_unified_tui(target, host, spark, rcon_addr, rcon_pwd)?;
             }
             Command::Watch { address } => {
-                launch_unified_tui(None, Some(address), None, None)?;
+                launch_unified_tui(None, Some(address), None, None, None)?;
             }
             Command::Ping { address } => {
                 let (host, socket_addr) = protocol::slp::resolve_server(&address, 25565, true)?;
@@ -270,7 +329,109 @@ fn main() -> Result<()> {
                 let result = ScanResult::read_json(&report)?;
                 print_scan(&result, top, bloat, sort.as_deref());
             }
+            Command::Purge {
+                x,
+                z,
+                entity_type,
+                dimension,
+                rcon,
+                password,
+            } => {
+                let addr_str = rcon.unwrap_or_else(|| "127.0.0.1:25575".to_string());
+                let (_, socket_addr) = protocol::slp::resolve_server(&addr_str, 25575, false)?;
+                let pwd = match password {
+                    Some(pwd) => pwd,
+                    None => std::env::var("CHUNKLENS_RCON_PASSWORD")
+                        .or_else(|_| std::env::var("RCON_PASSWORD"))
+                        .unwrap_or_else(|_| {
+                            rpassword::prompt_password("RCON password: ").unwrap_or_default()
+                        }),
+                };
+                let mut client = protocol::rcon::RconClient::connect(
+                    socket_addr,
+                    &pwd,
+                    std::time::Duration::from_secs(5),
+                )?;
+                let purge_command = live::generate_purge_command(&dimension, x, z, &entity_type);
+                println!(
+                    "
+  [1;32m✔[0m Connected to RCON at [1m{}[0m",
+                    socket_addr
+                );
+                println!(
+                    "  [1;38;2;251;146;60m⚡ Purging entities in chunk [{}, {}] (dimension: {})[0m",
+                    x, z, dimension
+                );
+                println!(
+                    "  [90mExecuting:[0m [1m/{}[0m
+",
+                    purge_command
+                );
+                let resp = client.execute(&purge_command)?;
+                let killed_count = live::parse_kill_count(&resp).unwrap_or(0);
+                if killed_count > 0 {
+                    println!(
+                        "  [1;32m✔ Successfully killed {} entities.[0m
+",
+                        killed_count
+                    );
+                } else {
+                    println!(
+                        "  [38;2;148;163;184mServer response: {}[0m
+",
+                        resp.trim()
+                    );
+                }
+            }
             Command::Servers => interactive_discovery()?,
+            Command::Live {
+                world,
+                rcon,
+                password,
+                spike_score,
+                spike_entities,
+                spike_hoppers,
+                spike_payload_kb,
+                mspt_threshold,
+                no_flush,
+            } => {
+                let target_world = if world.is_none() && rcon.is_some() {
+                    match resolve_world_path(world) {
+                        Ok(p) => p,
+                        Err(_) => PathBuf::from("remote-world"),
+                    }
+                } else {
+                    resolve_world_path(world)?
+                };
+                let rcon_addr = if let Some(addr_str) = rcon {
+                    let (_, socket_addr) = protocol::slp::resolve_server(&addr_str, 25575, false)?;
+                    Some(socket_addr)
+                } else {
+                    None
+                };
+                let rcon_pwd = match password {
+                    Some(pwd) => Some(pwd),
+                    None if rcon_addr.is_some() => std::env::var("CHUNKLENS_RCON_PASSWORD")
+                        .or_else(|_| std::env::var("RCON_PASSWORD"))
+                        .ok(),
+                    None => None,
+                };
+
+                let options = live::LiveOptions {
+                    world_dir: target_world,
+                    rcon_address: rcon_addr,
+                    rcon_password: rcon_pwd,
+                    spike_score,
+                    spike_entities,
+                    spike_hoppers,
+                    spike_payload_kb,
+                    mspt_threshold,
+                    auto_flush: !no_flush,
+                    poll_interval_secs: 2,
+                };
+                let mut watcher = live::LiveWatcher::new(options);
+                watcher.run()?;
+            }
         }
         return Ok(());
     }
@@ -387,7 +548,7 @@ fn interactive_start() -> Result<()> {
             return Ok(());
         }
         match choice.trim().to_ascii_lowercase().as_str() {
-            "1" => return launch_unified_tui(Some(local_world(&cwd)?), None, None, None),
+            "1" => return launch_unified_tui(Some(local_world(&cwd)?), None, None, None, None),
             "2" => return interactive_discovery(),
             "q" => return Ok(()),
             _ => println!("  Enter 1, 2, or Q."),
@@ -416,15 +577,47 @@ fn local_world(cwd: &std::path::Path) -> Result<PathBuf> {
     Ok(world)
 }
 
+fn resolve_world_path(world: Option<PathBuf>) -> Result<PathBuf> {
+    if let Some(path) = world {
+        if path.join("region").is_dir() {
+            return Ok(path);
+        }
+        if path.is_dir()
+            && path.file_name().is_some_and(|n| n == "region")
+            && let Some(parent) = path.parent()
+        {
+            return Ok(parent.to_path_buf());
+        }
+        return local_world(&path);
+    }
+    let cwd = std::env::current_dir()?;
+    if cwd.join("region").is_dir() {
+        return Ok(cwd);
+    }
+    let world_dir = cwd.join("world");
+    if world_dir.join("region").is_dir() {
+        return Ok(world_dir);
+    }
+    local_world(&cwd)
+}
+
 fn launch_unified_tui(
     target: Option<PathBuf>,
     host: Option<String>,
     spark: Option<PathBuf>,
     rcon_address: Option<std::net::SocketAddr>,
+    rcon_password: Option<String>,
 ) -> Result<()> {
     let scan = match target {
-        Some(path) if path.is_file() => ScanResult::read_json(&path)?,
+        Some(path) if path.is_file() => {
+            eprintln!(
+                "  [36m●[0m Loading world report from {}...",
+                path.display()
+            );
+            ScanResult::read_json(&path)?
+        }
         Some(path) if path.join("region").is_dir() => {
+            eprintln!("  [36m●[0m Scanning world at {}...", path.display());
             analysis::scan_world(&path, analysis::ScanOptions::default())?
         }
         Some(path) => {
@@ -432,6 +625,10 @@ fn launch_unified_tui(
             let world = worlds
                 .first()
                 .ok_or_else(|| anyhow::anyhow!("no world or report found at {}", path.display()))?;
+            eprintln!(
+                "  [36m●[0m Scanning discovered world at {}...",
+                world.path.display()
+            );
             analysis::scan_world(&world.path, analysis::ScanOptions::default())?
         }
         None => ScanResult::default(),
@@ -440,7 +637,7 @@ fn launch_unified_tui(
         .as_deref()
         .map(protocol::spark::parse_spark_report)
         .transpose()?;
-    let password = std::env::var("CHUNKLENS_RCON_PASSWORD").ok();
+    let password = rcon_password.or_else(|| std::env::var("CHUNKLENS_RCON_PASSWORD").ok());
     tui::run_tui(scan, host, spark, rcon_address, password)
 }
 

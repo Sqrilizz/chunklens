@@ -1,4 +1,8 @@
-use std::{fs, io::Read, path::Path};
+use std::{
+    fs,
+    io::{Read, Seek, SeekFrom},
+    path::Path,
+};
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use flate2::bufread::{GzDecoder, ZlibDecoder};
@@ -6,12 +10,103 @@ use flate2::bufread::{GzDecoder, ZlibDecoder};
 pub const SECTOR: usize = 4096;
 const MAX_CHUNK_BYTES: usize = 64 * 1024 * 1024;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChunkSlotHeader {
+    pub slot: usize,
+    pub sector_offset: usize,
+    pub sector_count: usize,
+    pub timestamp: u32,
+}
+
 pub fn region_coordinates(path: &Path) -> Option<(i32, i32)> {
     let name = path.file_name()?.to_str()?;
     let fields: Vec<_> = name.strip_suffix(".mca")?.split('.').collect();
     (fields.len() == 3 && fields[0] == "r")
         .then(|| Some((fields[1].parse().ok()?, fields[2].parse().ok()?)))
         .flatten()
+}
+
+pub fn read_region_header(path: &Path) -> Result<Vec<ChunkSlotHeader>> {
+    let mut file =
+        std::fs::File::open(path).with_context(|| format!("reading {}", path.display()))?;
+    let mut header = [0u8; SECTOR * 2];
+    file.read_exact(&mut header)
+        .with_context(|| format!("reading header from {}", path.display()))?;
+
+    let mut slots = Vec::with_capacity(1024);
+    for index in 0..1024 {
+        let loc = index * 4;
+        let offset = ((header[loc] as usize) << 16)
+            | ((header[loc + 1] as usize) << 8)
+            | header[loc + 2] as usize;
+        let sectors = header[loc + 3] as usize;
+        let ts_loc = 4096 + index * 4;
+        let timestamp = u32::from_be_bytes(header[ts_loc..ts_loc + 4].try_into().unwrap());
+        if offset >= 2 && sectors > 0 {
+            slots.push(ChunkSlotHeader {
+                slot: index,
+                sector_offset: offset,
+                sector_count: sectors,
+                timestamp,
+            });
+        }
+    }
+    Ok(slots)
+}
+
+pub fn read_single_chunk(
+    path: &Path,
+    slot: usize,
+    sector_offset: usize,
+    sectors: usize,
+    decompress_buf: &mut Vec<u8>,
+    decompressor: &mut libdeflater::Decompressor,
+) -> Result<()> {
+    let mut file =
+        std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let location = sector_offset
+        .checked_mul(SECTOR)
+        .ok_or_else(|| anyhow!("invalid sector offset"))?;
+    file.seek(SeekFrom::Start(location as u64))
+        .with_context(|| format!("seeking in {}", path.display()))?;
+
+    let mut length_bytes = [0u8; 4];
+    file.read_exact(&mut length_bytes)?;
+    let length = u32::from_be_bytes(length_bytes) as usize;
+    if length == 0 || length + 4 > sectors * SECTOR {
+        bail!("invalid chunk length or sector allocation in slot {slot}");
+    }
+
+    let mut compression_byte = [0u8; 1];
+    file.read_exact(&mut compression_byte)?;
+    let compression = compression_byte[0];
+
+    if compression & 0x80 != 0 {
+        let (region_x, region_z) = region_coordinates(path).context("invalid region filename")?;
+        let x = region_x
+            .checked_mul(32)
+            .and_then(|n| n.checked_add((slot % 32) as i32))
+            .context("external chunk X coordinate overflow")?;
+        let z = region_z
+            .checked_mul(32)
+            .and_then(|n| n.checked_add((slot / 32) as i32))
+            .context("external chunk Z coordinate overflow")?;
+        let ext_path = path
+            .parent()
+            .context("region path has no parent")?
+            .join(format!("c.{x}.{z}.mcc"));
+        let ext_payload = fs::read(&ext_path)
+            .with_context(|| format!("reading external {}", ext_path.display()))?;
+        decompress_into_with(decompressor, compression, &ext_payload, decompress_buf)
+            .context("decompressing external chunk")?;
+    } else {
+        let payload_len = length.saturating_sub(1);
+        let mut raw_slice = vec![0u8; payload_len];
+        file.read_exact(&mut raw_slice)?;
+        decompress_into_with(decompressor, compression, &raw_slice, decompress_buf)
+            .context("decompressing chunk payload")?;
+    }
+    Ok(())
 }
 
 #[allow(dead_code)]
@@ -312,7 +407,9 @@ fn decompress(compression: u8, payload: &[u8]) -> Result<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{decompress, region_coordinates};
+    use super::{
+        ChunkSlotHeader, decompress, read_region_header, read_single_chunk, region_coordinates,
+    };
     use flate2::{
         Compression,
         write::{GzEncoder, ZlibEncoder},
@@ -395,5 +492,45 @@ mod tests {
     fn reads_independent_java_compressor_fixture() {
         let bytes = include_bytes!("../tests/fixtures/lz4-java.bin");
         assert_eq!(decompress(4, bytes).unwrap(), b"chunklens".repeat(20_000));
+    }
+
+    #[test]
+    fn reads_header_and_single_chunk_via_seek() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("r.0.0.mca");
+        let mut bytes = vec![0; super::SECTOR * 3];
+        // slot 0 at sector 2, length 1 sector, timestamp 12345
+        bytes[..4].copy_from_slice(&[0, 0, 2, 1]);
+        bytes[4096..4100].copy_from_slice(&12345_u32.to_be_bytes());
+
+        // payload at sector 2 (8192 bytes offset)
+        let chunk_data = b"hello seek chunk";
+        let mut zlib = ZlibEncoder::new(Vec::new(), Compression::default());
+        zlib.write_all(chunk_data).unwrap();
+        let compressed = zlib.finish().unwrap();
+
+        let len = (compressed.len() + 1) as u32;
+        bytes[8192..8196].copy_from_slice(&len.to_be_bytes());
+        bytes[8196] = 2; // zlib
+        bytes[8197..8197 + compressed.len()].copy_from_slice(&compressed);
+
+        std::fs::write(&path, &bytes).unwrap();
+
+        let headers = read_region_header(&path).unwrap();
+        assert_eq!(headers.len(), 1);
+        assert_eq!(
+            headers[0],
+            ChunkSlotHeader {
+                slot: 0,
+                sector_offset: 2,
+                sector_count: 1,
+                timestamp: 12345,
+            }
+        );
+
+        let mut out = Vec::new();
+        let mut decompressor = libdeflater::Decompressor::new();
+        read_single_chunk(&path, 0, 2, 1, &mut out, &mut decompressor).unwrap();
+        assert_eq!(out, chunk_data);
     }
 }

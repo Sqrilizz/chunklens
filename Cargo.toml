@@ -30,6 +30,7 @@ rpassword = "7"
 xxhash-rust = { version = "0.8", features = ["xxh32"] }
 prost = "0.14"
 libdeflater = "1.26.1"
+notify = "8.2.0"
 
 [profile.release]
 opt-level = 3

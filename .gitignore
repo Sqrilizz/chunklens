@@ -11,3 +11,4 @@
 /live-spark*.json
 /*.bin
 *.tar.zst
+spotify-hud-source/

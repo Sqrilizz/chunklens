@@ -37,6 +37,7 @@ fn run_loop(
 ) -> Result<()> {
     let mut dirty = true;
     while !state.should_quit {
+        state.tick_count = state.tick_count.wrapping_add(1);
         if !state.server_host.is_empty()
             && !state.poll_pending
             && state.last_poll.elapsed() >= state.poll_interval
@@ -48,6 +49,9 @@ fn run_loop(
         let had_notification = state.notification.is_some();
         state.clear_expired_notification();
         dirty |= had_notification != state.notification.is_some();
+        if state.poll_pending || state.rcon_pending || !state.server_host.is_empty() {
+            dirty = true;
+        }
         if dirty {
             terminal.draw(|frame| ui::render(frame, state))?;
             dirty = false;
@@ -202,8 +206,19 @@ fn handle_key(state: &mut AppState, code: KeyCode, modifiers: KeyModifiers) {
             }
         }
 
-        KeyCode::Char('c') | KeyCode::Char('C') => {
+        KeyCode::Char('c' | 'C' | 'y' | 'Y') => {
             state.copy_teleport_command();
+        }
+
+        KeyCode::Char('x' | 'X' | 'p' | 'P') if state.active_tab == Tab::Hotspots => {
+            state.copy_purge_command();
+        }
+
+        KeyCode::Char('f' | 'F') if state.active_tab == Tab::Hotspots => {
+            state.filter_category = state.filter_category.next();
+            state.refresh_filter();
+            let label = state.filter_category.label();
+            state.notify(format!("Filter category: {label}"));
         }
 
         KeyCode::Char('/') => {

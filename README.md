@@ -3,32 +3,21 @@
 [![CI](https://github.com/Sqrilizz/chunklens/actions/workflows/ci.yml/badge.svg)](https://github.com/Sqrilizz/chunklens/actions/workflows/ci.yml)
 [![Rust: 2024](https://img.shields.io/badge/Rust-2024_Edition-orange.svg)](https://www.rust-lang.org/)
 
-ChunkLens is a fast, read-only Minecraft Java Edition Anvil region scanner, terminal UI lag investigator, and Spark profile correlator written in Rust.
+Fast, read-only Minecraft Java Edition Anvil region scanner, split-screen lag investigator, and Spark profile correlator written in Rust.
 
-It safely parses saved `.mca` region files, extracts dense entity clusters, detects NBT bloat and dupe stashes, clusters neighboring loaded regions, and provides an interactive terminal dashboard without modifying world files or degrading server MSPT.
-
----
-
-## Performance Highlights
-
-* ~75,000 chunks/second throughput on modern NVMe drives with multi-threaded parallel scanning (Rayon).
-* Real-world benchmark: scanned an entire production world (2,587,788 chunks) in 35.2 seconds with zero impact on active players.
-* SIMD-accelerated decompression powered by `libdeflater` for fast zlib/gzip chunk handling with zero heap allocations for standard palettes.
-* Memory-safe guardrails: rejects decoded reports over 256 MiB to prevent OOM when loading historical scans.
+It scans `.mca` files at NVMe speed, surfaces root-cause culprits (villager AI clusters, unoptimized hoppers, redstone clocks, NBT bloat/dupe stashes), and gives you an instant master-detail TUI with one-key fixes (`/tp`, targeted `/kill`) and remote RCON integration.
 
 ---
 
-## Key Features
+## Highlights
 
-* Anvil & MCC Parsing: reads standard `.mca` region and entity files as well as external `.mcc` oversized chunks.
-* Potential Load Score: multi-factor heuristic ranking chunks based on hoppers, hopper minecarts, villagers, mob counts, tile entities, and redstone clocks.
-* NBT Bloat & Dupe Detection: flags chunks with massive payloads (>1 MB), excessive shulker boxes, item frames, or thousands of container slots.
-* Adjacent Chunk Clustering: detects sprawling mega-bases and mob farms that cross chunk borders and computes cumulative lag scores.
-* Interactive Terminal UI (TUI): built with Ratatui; featuring chunk tables, multi-chunk heatmaps, Spark profile inspector, and live RCON console.
-* Live Server Integration:
-  * SLP Ping: real-time server latency, player counts, protocol version, and ANSI MOTD.
-  * Spark Integration: ingests Spark `.pb` protobuf or `.json` profile dumps to correlate offline world hotspots with live thread MSPT.
-  * Built-in RCON: inspect, teleport (`/tp @s`), or execute console commands directly from the dashboard.
+* **Fast parallel scanning:** ~75,000 chunks/second throughput on NVMe with multi-threaded parallel scanning (Rayon).
+* **Low-overhead decompression:** SIMD-accelerated decompression via `libdeflater` for zlib/deflate payloads with minimal allocations.
+* **Dual-pane TUI:** Master-detail split screen (lazygit/btop style) — see all top offenders on the left, instant deep diagnosis and one-key commands on the right.
+* **Smart chunk diagnostics:** Automatic heuristic tags (`[VILLAGER]`, `[HOPPERS]`, `[REDSTONE]`, `[NBT-STASH]`, `[MOB-FARM]`) with clear severity levels.
+* **Spark profiler correlation:** Ingests Spark `.json` and binary `.pb` dumps to correlate offline world hotspots with live thread MSPT (`EntityTickList.forEach`, etc.).
+* **Live RCON & SLP:** Live server ping watcher with latency history, online player monitoring, and interactive remote console.
+* **Memory safe:** Bounded report decoding to prevent OOM on massive multi-gigabyte worlds.
 
 ---
 
@@ -36,7 +25,7 @@ It safely parses saved `.mca` region files, extracts dense entity clusters, dete
 
 ### From Source
 
-Ensure you have Rust (edition 2024 / latest stable) installed:
+Requires Rust (edition 2024 / stable 1.85+):
 
 ```bash
 git clone https://github.com/Sqrilizz/chunklens.git
@@ -44,7 +33,7 @@ cd chunklens
 cargo build --release
 ```
 
-The compiled binary will be located at `target/release/chunklens`.
+The binary will be built at `target/release/chunklens`.
 
 ---
 
@@ -52,7 +41,7 @@ The compiled binary will be located at `target/release/chunklens`.
 
 ### Quick Start (Interactive Menu)
 
-Run `chunklens` with no arguments to automatically detect local Minecraft servers (Paper, Purpur, Leaf, Folia, Fabric, Forge, Pumpkin, etc.) or search the filesystem:
+Run `chunklens` with no arguments to discover local server installations or inspect the current directory:
 
 ```bash
 chunklens
@@ -61,68 +50,73 @@ chunklens
 ### World Scanning
 
 ```bash
-# Fast scan with all CPU cores and export compressed JSON report
+# Fast scan with all CPU cores and export report
 chunklens scan /path/to/world --fast --json report.json.gz -n 20
 
 # Eco scan (half cores) for background scanning on production servers
 chunklens scan /path/to/world --eco --min-score 20.0 -n 10
 
-# Inspect NBT bloat and oversized storage stashes
+# Scan for oversized chunks (>1MB) and dense container storage
 chunklens scan /path/to/world --bloat -n 20
 
-# Rank chunks by specific category (villagers, hoppers, stands, entities, redstone, chests, shulkers)
+# Rank chunks by specific category (villagers, hoppers, redstone, bloat, etc.)
 chunklens scan /path/to/world --sort villagers -n 15
 ```
 
-### Offline Report Analysis
+### Emergency Triage TUI (Master-Detail)
+
+Launch the dashboard on a world folder or saved report:
 
 ```bash
-# Inspect a saved report without re-reading the world
-chunklens load report.json.gz -n 20
-
-# Rank saved report by category
-chunklens load report.json.gz --sort hoppers -n 10
-
-# Launch interactive fullscreen TUI
+# Open saved report in TUI
 chunklens tui report.json.gz
+
+# Open report with live server ping & remote RCON
+chunklens tui report.json.gz --host play.example.com:25565 --rcon play.example.com:25575 -p <password>
+
+# Correlate world chunks with a Spark profile dump
+chunklens tui report.json.gz --spark spark-report.json
 ```
 
-### Server Monitoring & Live Diagnostics
+### Remote Operations & Monitoring
 
 ```bash
-# Ping a live server via Server List Ping (SLP)
+# Ping a live server via SLP (Server List Ping)
 chunklens ping play.example.com:25565
 
 # Real-time watcher with latency sparklines
 chunklens watch play.example.com:25565
 
-# Correlate world chunks with a Spark profile
-chunklens tui report.json.gz --host play.example.com:25565 --spark spark-profile.pb
+# Execute command on remote server via RCON
+chunklens rcon play.example.com:25575 -p <password> "tps"
 
-# Ingest and summarize a Spark profile in CLI
+# Ingest and summarize a Spark profile dump in CLI
 chunklens spark spark-profile.json
 ```
 
 ---
 
-## TUI Navigation & Shortcuts
+## TUI Keyboard Shortcuts
 
 | Key | Action |
 |:---:|:---|
-| `Tab` / `1`–`4` | Switch primary tabs (Chunks, Clusters, Live Monitor, RCON) |
-| `↑` / `↓` or `J` / `K` | Navigate rows |
-| `PageUp` / `PageDown` | Scroll table pages |
-| `/` | Search & filter chunks |
-| `Enter` / `D` | Open detailed Chunk Inspector |
-| `H` | Open 2D World Heatmap |
-| `S` | Open Spark Profiler Analysis |
-| `C` / `Y` | Copy teleport command (`/tp @s X ~ Z`) to clipboard |
-| `?` | Toggle Help popup |
-| `Esc` / `Q` | Back / Quit |
+| `1` – `4` / `Tab` | Switch main views (`1: Chunks`, `2: Clusters`, `3: Live Monitor`, `4: Console`) |
+| `j` / `k` or `↑` / `↓` | Navigate top offender rows (right pane updates instantly) |
+| `PgUp` / `PgDn` | Scroll table page |
+| `f` | Cycle category filter (`All` → `Villagers & Mobs` → `Hoppers` → `Redstone` → `NBT & Storage`) |
+| `/` | Instant text search (coordinates, dimension, score) |
+| `y` / `c` | Copy `/tp @s X ~ Z` teleport command to clipboard |
+| `x` / `p` | Copy targeted `/kill` purge command for selected chunk |
+| `Enter` / `d` | Open full fullscreen chunk inspector |
+| `h` | Open 2D potential load heatmap |
+| `s` | Open Spark profile analysis tab |
+| `r` | Refresh live server status & ping |
+| `?` | Toggle help popup |
+| `Esc` / `q` | Back / Quit |
 
 ---
 
-## Testing & Code Quality
+## Development & Testing
 
 ```bash
 cargo fmt --check

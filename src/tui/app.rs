@@ -46,6 +46,38 @@ impl Tab {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FilterCategory {
+    #[default]
+    All,
+    VillagersMobs,
+    Hoppers,
+    Redstone,
+    NbtStorage,
+}
+
+impl FilterCategory {
+    pub fn next(self) -> Self {
+        match self {
+            Self::All => Self::VillagersMobs,
+            Self::VillagersMobs => Self::Hoppers,
+            Self::Hoppers => Self::Redstone,
+            Self::Redstone => Self::NbtStorage,
+            Self::NbtStorage => Self::All,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::VillagersMobs => "Villagers & Mobs",
+            Self::Hoppers => "Hoppers",
+            Self::Redstone => "Redstone",
+            Self::NbtStorage => "NBT & Storage",
+        }
+    }
+}
+
 enum BackgroundEvent {
     Ping(Result<(SocketAddr, ServerPingResponse), String>),
     Rcon(Result<String, String>),
@@ -70,9 +102,11 @@ pub struct AppState {
     pub cluster_state: ListState,
     pub search_query: String,
     pub is_searching: bool,
+    pub filter_category: FilterCategory,
     pub selected_chunk_index: usize,
     pub notification: Option<(String, Instant)>,
     pub should_quit: bool,
+    pub tick_count: usize,
     // Heatmap navigation
     pub heatmap_offset_x: f64,
     pub heatmap_offset_z: f64,
@@ -165,9 +199,11 @@ impl AppState {
             cluster_state,
             search_query: String::new(),
             is_searching: false,
+            filter_category: FilterCategory::default(),
             selected_chunk_index: 0,
             notification: None,
             should_quit: false,
+            tick_count: 0,
             heatmap_offset_x: center_x,
             heatmap_offset_z: center_z,
             heatmap_scale: 1.0,
@@ -319,27 +355,42 @@ impl AppState {
     pub fn refresh_filter(&mut self) {
         self.table_scroll = 0;
         let q = self.search_query.trim().to_lowercase().replace(", ", ",");
-        if q.is_empty() {
-            self.filtered_chunk_indices = (0..self.scan.chunks.len()).collect();
-        } else {
-            self.filtered_chunk_indices = self
-                .scan
-                .chunks
-                .iter()
-                .enumerate()
-                .filter(|(_, c)| {
-                    let dim = c.dimension.to_lowercase();
-                    let coords = format!("{},{}", c.chunk_x, c.chunk_z);
-                    let block_coords = format!("{},{}", c.block_x(), c.block_z());
-                    let score_str = format!("{:.0}", c.score);
-                    dim.contains(&q)
-                        || coords.contains(&q)
-                        || block_coords.contains(&q)
-                        || score_str.contains(&q)
-                })
-                .map(|(i, _)| i)
-                .collect();
-        }
+        let cat = self.filter_category;
+        self.filtered_chunk_indices = self
+            .scan
+            .chunks
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| {
+                let matches_cat = match cat {
+                    FilterCategory::All => true,
+                    FilterCategory::VillagersMobs => c.villagers > 5 || c.entity_count > 20,
+                    FilterCategory::Hoppers => c.hoppers > 10 || c.hopper_minecarts > 0,
+                    FilterCategory::Redstone => {
+                        (c.redstone_wire + c.repeaters + c.comparators + c.observers + c.pistons)
+                            > 15
+                    }
+                    FilterCategory::NbtStorage => {
+                        c.payload_size > 200_000 || c.shulkers > 5 || c.chests > 30
+                    }
+                };
+                if !matches_cat {
+                    return false;
+                }
+                if q.is_empty() {
+                    return true;
+                }
+                let dim = c.dimension.to_lowercase();
+                let coords = format!("{},{}", c.chunk_x, c.chunk_z);
+                let block_coords = format!("{},{}", c.block_x(), c.block_z());
+                let score_str = format!("{:.0}", c.score);
+                dim.contains(&q)
+                    || coords.contains(&q)
+                    || block_coords.contains(&q)
+                    || score_str.contains(&q)
+            })
+            .map(|(i, _)| i)
+            .collect();
 
         if self.filtered_chunk_indices.is_empty() {
             self.table_state.select(None);
@@ -495,7 +546,30 @@ impl AppState {
             print!("\x1b]52;c;{encoded}\x07");
             use std::io::Write;
             let _ = std::io::stdout().flush();
-            self.notify(format!("Clipboard: {command}"));
+            self.notify(format!("Copied /tp: {command}"));
+        }
+    }
+
+    pub fn copy_purge_command(&mut self) {
+        if let Some(c) = self.selected_chunk() {
+            let entity_type = if c.villagers > 15 {
+                "villager"
+            } else if c.dropped_items > 30 {
+                "item"
+            } else {
+                "all"
+            };
+            let command = crate::live::generate_purge_command(
+                &c.dimension,
+                c.chunk_x,
+                c.chunk_z,
+                entity_type,
+            );
+            let encoded = base64::engine::general_purpose::STANDARD.encode(&command);
+            print!("\x1b]52;c;{encoded}\x07");
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+            self.notify(format!("Copied /kill command: {command}"));
         }
     }
 
@@ -568,5 +642,43 @@ mod tests {
         app.search_query = "nothing".into();
         app.refresh_filter();
         assert!(app.selected_chunk().is_none());
+    }
+    #[test]
+    fn category_filters_and_purge_command() {
+        let scan = ScanResult {
+            chunks: vec![
+                ChunkMetrics {
+                    chunk_x: 1,
+                    chunk_z: 1,
+                    villagers: 50,
+                    dimension: "world".into(),
+                    ..Default::default()
+                },
+                ChunkMetrics {
+                    chunk_x: 2,
+                    chunk_z: 2,
+                    hoppers: 80,
+                    dimension: "world".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let mut app = AppState::new(scan, None, None, None, None);
+        assert_eq!(app.filtered_chunk_indices.len(), 2);
+
+        app.filter_category = FilterCategory::VillagersMobs;
+        app.refresh_filter();
+        assert_eq!(app.filtered_chunk_indices.len(), 1);
+        assert_eq!(app.selected_chunk().unwrap().chunk_x, 1);
+
+        app.copy_purge_command();
+        assert!(app.notification.as_ref().unwrap().0.contains("/kill"));
+        assert!(app.notification.as_ref().unwrap().0.contains("villager"));
+
+        app.filter_category = FilterCategory::Hoppers;
+        app.refresh_filter();
+        assert_eq!(app.filtered_chunk_indices.len(), 1);
+        assert_eq!(app.selected_chunk().unwrap().chunk_x, 2);
     }
 }
