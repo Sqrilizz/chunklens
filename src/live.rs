@@ -479,7 +479,10 @@ impl LiveWatcher {
                     EventKind::Modify(_) | EventKind::Create(_) | EventKind::Any
                 ) {
                     for path in event.paths {
-                        if path.extension().is_some_and(|ext| ext == "mca") {
+                        if path
+                            .extension()
+                            .is_some_and(|ext| ext == "mca" || ext == "linear")
+                        {
                             modified_regions.insert(path);
                         }
                     }
@@ -515,7 +518,9 @@ impl LiveWatcher {
         let entries = std::fs::read_dir(region_dir)?;
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().is_some_and(|ext| ext == "mca")
+            if path
+                .extension()
+                .is_some_and(|ext| ext == "mca" || ext == "linear")
                 && let Ok(headers) = region::read_region_header(&path)
             {
                 for slot in headers {

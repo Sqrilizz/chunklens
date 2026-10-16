@@ -1,18 +1,21 @@
 # ChunkLens
 
 [![CI](https://github.com/Sqrilizz/chunklens/actions/workflows/ci.yml/badge.svg)](https://github.com/Sqrilizz/chunklens/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/Sqrilizz/chunklens?color=blue)](https://github.com/Sqrilizz/chunklens/releases)
 [![Rust: 2024](https://img.shields.io/badge/Rust-2024_Edition-orange.svg)](https://www.rust-lang.org/)
 
-Fast, read-only Minecraft Java Edition Anvil region scanner, split-screen lag investigator, and Spark profile correlator written in Rust.
+Fast, read-only Minecraft Java Edition Anvil & Linear region scanner, split-screen lag investigator, and Spark profile correlator written in Rust.
 
-It scans `.mca` files at NVMe speed, surfaces root-cause culprits (villager AI clusters, unoptimized hoppers, redstone clocks, NBT bloat/dupe stashes), and gives you an instant master-detail TUI with one-key fixes (`/tp`, targeted `/kill`) and remote RCON integration.
+It scans `.mca` and `.linear` files at NVMe speed, surfaces root-cause culprits (villager AI clusters, unoptimized hoppers, redstone clocks, NBT bloat/dupe stashes), and gives you an instant master-detail TUI with one-key fixes (`/tp`, targeted `/kill`) and zero-config remote RCON integration.
 
 ---
 
 ## Highlights
 
 * **Fast parallel scanning:** ~75,000 chunks/second throughput on NVMe with multi-threaded parallel scanning (Rayon).
-* **Low-overhead decompression:** SIMD-accelerated decompression via `libdeflater` for zlib/deflate payloads with minimal allocations.
+* **Anvil & Linear formats:** Native support for both vanilla Anvil (`.mca`) and high-performance Zstandard Linear (`.linear`) region formats used in Leaf, Gale, Purpur, and LeavesMC.
+* **Low-overhead decompression:** SIMD-accelerated decompression via `libdeflater` for zlib/deflate and `zstd` for Linear regions with minimal allocations.
+* **Zero-config RCON & discovery:** Automatically detects RCON passwords and ports from local `.env`, `server.properties`, and `pumpkin.toml` when inside a server folder.
 * **Dual-pane TUI:** Master-detail split screen (lazygit/btop style) — see all top offenders on the left, instant deep diagnosis and one-key commands on the right.
 * **Smart chunk diagnostics:** Automatic heuristic tags (`[VILLAGER]`, `[HOPPERS]`, `[REDSTONE]`, `[NBT-STASH]`, `[MOB-FARM]`) with clear severity levels.
 * **Spark profiler correlation:** Ingests Spark `.json` and binary `.pb` dumps to correlate offline world hotspots with live thread MSPT (`EntityTickList.forEach`, etc.).
@@ -22,6 +25,10 @@ It scans `.mca` files at NVMe speed, surfaces root-cause culprits (villager AI c
 ---
 
 ## Installation
+
+### Pre-built Binaries
+
+Download pre-compiled standalone binaries for Linux, macOS, and Windows from [GitHub Releases](https://github.com/Sqrilizz/chunklens/releases).
 
 ### From Source
 
@@ -50,7 +57,7 @@ chunklens
 ### World Scanning
 
 ```bash
-# Fast scan with all CPU cores and export report
+# Fast scan with all CPU cores and export report (supports .mca and .linear)
 chunklens scan /path/to/world --fast --json report.json.gz -n 20
 
 # Eco scan (half cores) for background scanning on production servers
@@ -71,7 +78,10 @@ Launch the dashboard on a world folder or saved report:
 # Open saved report in TUI
 chunklens tui report.json.gz
 
-# Open report with live server ping & remote RCON
+# Open world with automatic RCON connection (auto-detects password from server.properties/.env)
+chunklens tui /path/to/server
+
+# Open report with explicit live server ping & remote RCON
 chunklens tui report.json.gz --host play.example.com:25565 --rcon play.example.com:25575 -p <password>
 
 # Correlate world chunks with a Spark profile dump
@@ -86,6 +96,9 @@ chunklens ping play.example.com:25565
 
 # Real-time watcher with latency sparklines
 chunklens watch play.example.com:25565
+
+# Execute command on local server via RCON (auto-detects credentials from server.properties)
+chunklens rcon "tps"
 
 # Execute command on remote server via RCON
 chunklens rcon play.example.com:25575 -p <password> "tps"
