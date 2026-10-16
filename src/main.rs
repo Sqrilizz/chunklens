@@ -97,13 +97,16 @@ enum Command {
     },
     /// Execute a command on a live Minecraft server via Source RCON
     Rcon {
-        /// Server address host:port (defaults to port 25575)
-        address: String,
+        /// Server address host:port (or command if executing on local/detected server)
+        target: String,
+        /// Command to execute if target is server address (e.g. "tps" or "list")
+        command: Option<String>,
+        /// Explicit address override (e.g. 127.0.0.1:25575)
+        #[arg(short, long)]
+        address: Option<String>,
         /// RCON password
         #[arg(short, long, env = "CHUNKLENS_RCON_PASSWORD", hide_env_values = true)]
         password: Option<String>,
-        /// Command to execute (e.g. "tps" or "list")
-        command: String,
     },
     /// Ingest and analyze a Spark profiler report JSON
     Spark {
@@ -289,12 +292,28 @@ fn main() -> Result<()> {
                 );
             }
             Command::Rcon {
+                target,
+                command,
                 address,
                 password,
-                command,
             } => {
-                let (_, socket_addr) = protocol::slp::resolve_server(&address, 25575, false)?;
-                let pwd = match password {
+                let detected = discovery::auto_detect_rcon(None);
+                let (addr_str, cmd_str) = match (command, address) {
+                    (Some(cmd), Some(addr)) => (addr, cmd),
+                    (Some(cmd), None) => (target, cmd),
+                    (None, Some(addr)) => (addr, target),
+                    (None, None) => {
+                        if target.contains(':') && !target.contains(' ') {
+                            (target, "list".to_string())
+                        } else {
+                            let h = detected.host.as_deref().unwrap_or("127.0.0.1");
+                            let p = detected.port.unwrap_or(25575);
+                            (format!("{h}:{p}"), target)
+                        }
+                    }
+                };
+                let (_, socket_addr) = protocol::slp::resolve_server(&addr_str, 25575, false)?;
+                let pwd = match password.or(detected.password) {
                     Some(pwd) => pwd,
                     None => std::env::var("RCON_PASSWORD").unwrap_or_else(|_| {
                         rpassword::prompt_password("RCON password: ").unwrap_or_default()
@@ -309,8 +328,8 @@ fn main() -> Result<()> {
                     "\n  \x1b[1;32m✔\x1b[0m Connected to RCON at \x1b[1m{}\x1b[0m",
                     socket_addr
                 );
-                println!("  \x1b[90mExecuting:\x1b[0m \x1b[1m/{}\x1b[0m\n", command);
-                let resp = client.execute(&command)?;
+                println!("  \x1b[90mExecuting:\x1b[0m \x1b[1m/{}\x1b[0m\n", cmd_str);
+                let resp = client.execute(&cmd_str)?;
                 for line in resp.lines() {
                     println!("  {}", line);
                 }
@@ -337,9 +356,14 @@ fn main() -> Result<()> {
                 rcon,
                 password,
             } => {
-                let addr_str = rcon.unwrap_or_else(|| "127.0.0.1:25575".to_string());
+                let detected = discovery::auto_detect_rcon(None);
+                let addr_str = rcon.unwrap_or_else(|| {
+                    let h = detected.host.as_deref().unwrap_or("127.0.0.1");
+                    let p = detected.port.unwrap_or(25575);
+                    format!("{h}:{p}")
+                });
                 let (_, socket_addr) = protocol::slp::resolve_server(&addr_str, 25575, false)?;
-                let pwd = match password {
+                let pwd = match password.or(detected.password) {
                     Some(pwd) => pwd,
                     None => std::env::var("CHUNKLENS_RCON_PASSWORD")
                         .or_else(|_| std::env::var("RCON_PASSWORD"))
@@ -409,12 +433,21 @@ fn main() -> Result<()> {
                 } else {
                     None
                 };
-                let rcon_pwd = match password {
-                    Some(pwd) => Some(pwd),
-                    None if rcon_addr.is_some() => std::env::var("CHUNKLENS_RCON_PASSWORD")
-                        .or_else(|_| std::env::var("RCON_PASSWORD"))
-                        .ok(),
-                    None => None,
+                let detected = discovery::auto_detect_rcon(Some(&target_world));
+                let rcon_pwd = password
+                    .or_else(|| std::env::var("CHUNKLENS_RCON_PASSWORD").ok())
+                    .or_else(|| std::env::var("RCON_PASSWORD").ok())
+                    .or_else(|| detected.password.clone());
+                let rcon_addr = if let Some(addr) = rcon_addr {
+                    Some(addr)
+                } else if rcon_pwd.is_some() {
+                    let h = detected.host.as_deref().unwrap_or("127.0.0.1");
+                    let p = detected.port.unwrap_or(25575);
+                    protocol::slp::resolve_server(&format!("{h}:{p}"), p, false)
+                        .ok()
+                        .map(|(_, sa)| sa)
+                } else {
+                    None
                 };
 
                 let options = live::LiveOptions {
@@ -608,6 +641,7 @@ fn launch_unified_tui(
     rcon_address: Option<std::net::SocketAddr>,
     rcon_password: Option<String>,
 ) -> Result<()> {
+    let detected_rcon = discovery::auto_detect_rcon(target.as_deref());
     let scan = match target {
         Some(path) if path.is_file() => {
             eprintln!(
@@ -637,8 +671,22 @@ fn launch_unified_tui(
         .as_deref()
         .map(protocol::spark::parse_spark_report)
         .transpose()?;
-    let password = rcon_password.or_else(|| std::env::var("CHUNKLENS_RCON_PASSWORD").ok());
-    tui::run_tui(scan, host, spark, rcon_address, password)
+    let password = rcon_password
+        .or_else(|| std::env::var("CHUNKLENS_RCON_PASSWORD").ok())
+        .or_else(|| std::env::var("RCON_PASSWORD").ok())
+        .or_else(|| detected_rcon.password.clone());
+    let final_rcon_addr = if let Some(addr) = rcon_address {
+        Some(addr)
+    } else if password.is_some() {
+        let h = detected_rcon.host.as_deref().unwrap_or("127.0.0.1");
+        let p = detected_rcon.port.unwrap_or(25575);
+        protocol::slp::resolve_server(&format!("{h}:{p}"), p, false)
+            .ok()
+            .map(|(_, sa)| sa)
+    } else {
+        None
+    };
+    tui::run_tui(scan, host, spark, final_rcon_addr, password)
 }
 
 fn print_spark_summary(summary: &protocol::spark::SparkProfileSummary) {

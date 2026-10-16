@@ -639,14 +639,186 @@ pub fn discover_worlds(server: &Path) -> Result<Vec<World>> {
     Ok(worlds)
 }
 
-fn parse_properties(path: &Path) -> Result<HashMap<String, String>> {
+pub fn parse_properties(path: &Path) -> Result<HashMap<String, String>> {
     Ok(fs::read_to_string(path)?
         .lines()
         .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') || line.starts_with('!') {
+                return None;
+            }
             line.split_once('=')
                 .map(|(k, v)| (k.trim().to_owned(), v.trim().to_owned()))
         })
         .collect())
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RconCredentials {
+    pub password: Option<String>,
+    pub port: Option<u16>,
+    pub host: Option<String>,
+}
+
+pub fn parse_env_file(path: &Path) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let Ok(content) = fs::read_to_string(path) else {
+        return map;
+    };
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if let Some((k, v)) = trimmed.split_once('=') {
+            let key = k.trim().to_ascii_uppercase();
+            let val = v.trim().trim_matches('"').trim_matches('\'').to_string();
+            if !val.is_empty() {
+                map.insert(key, val);
+            }
+        }
+    }
+    map
+}
+
+pub fn auto_detect_rcon(hint: Option<&Path>) -> RconCredentials {
+    let mut creds = RconCredentials::default();
+
+    // 1. Direct environment variables
+    if let Ok(pwd) =
+        std::env::var("CHUNKLENS_RCON_PASSWORD").or_else(|_| std::env::var("RCON_PASSWORD"))
+        && !pwd.trim().is_empty()
+    {
+        creds.password = Some(pwd.trim().to_string());
+    }
+    if let Ok(p) = std::env::var("CHUNKLENS_RCON_PORT").or_else(|_| std::env::var("RCON_PORT"))
+        && let Ok(parsed) = p.trim().parse::<u16>()
+    {
+        creds.port = Some(parsed);
+    }
+    if let Ok(h) = std::env::var("CHUNKLENS_RCON_HOST").or_else(|_| std::env::var("RCON_HOST"))
+        && !h.trim().is_empty()
+    {
+        creds.host = Some(h.trim().to_string());
+    }
+
+    // 2. Candidate directories
+    let mut candidate_dirs = Vec::new();
+    if let Some(hint_path) = hint {
+        if hint_path.is_dir() {
+            candidate_dirs.push(hint_path.to_path_buf());
+            if let Some(p) = hint_path.parent() {
+                candidate_dirs.push(p.to_path_buf());
+                if let Some(gp) = p.parent() {
+                    candidate_dirs.push(gp.to_path_buf());
+                }
+            }
+        } else if let Some(p) = hint_path.parent() {
+            candidate_dirs.push(p.to_path_buf());
+            if let Some(gp) = p.parent() {
+                candidate_dirs.push(gp.to_path_buf());
+            }
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        candidate_dirs.push(cwd);
+    }
+    candidate_dirs.dedup();
+
+    for dir in candidate_dirs {
+        // A) .env
+        let env_file = dir.join(".env");
+        if env_file.is_file() {
+            let env_map = parse_env_file(&env_file);
+            if creds.password.is_none() {
+                creds.password = env_map
+                    .get("CHUNKLENS_RCON_PASSWORD")
+                    .or_else(|| env_map.get("RCON_PASSWORD"))
+                    .or_else(|| env_map.get("MINECRAFT_RCON_PASSWORD"))
+                    .or_else(|| env_map.get("RCON_PASS"))
+                    .cloned();
+            }
+            if creds.port.is_none() {
+                creds.port = env_map
+                    .get("CHUNKLENS_RCON_PORT")
+                    .or_else(|| env_map.get("RCON_PORT"))
+                    .or_else(|| env_map.get("MINECRAFT_RCON_PORT"))
+                    .and_then(|p| p.parse().ok());
+            }
+            if creds.host.is_none() {
+                creds.host = env_map
+                    .get("CHUNKLENS_RCON_HOST")
+                    .or_else(|| env_map.get("RCON_HOST"))
+                    .or_else(|| env_map.get("MINECRAFT_RCON_HOST"))
+                    .cloned();
+            }
+        }
+
+        // B) server.properties
+        let prop_file = dir.join("server.properties");
+        if prop_file.is_file()
+            && let Ok(props) = parse_properties(&prop_file)
+        {
+            if creds.password.is_none()
+                && let Some(pwd) = props.get("rcon.password").filter(|s| !s.is_empty())
+            {
+                creds.password = Some(pwd.clone());
+            }
+            if creds.port.is_none()
+                && let Some(port) = props.get("rcon.port").and_then(|p| p.parse().ok())
+            {
+                creds.port = Some(port);
+            }
+            if creds.host.is_none()
+                && let Some(ip) = props
+                    .get("server-ip")
+                    .filter(|s| !s.is_empty() && *s != "0.0.0.0")
+            {
+                creds.host = Some(ip.clone());
+            }
+        }
+
+        // C) pumpkin.toml / configuration.toml
+        for config_name in [
+            "pumpkin.toml",
+            "configuration.toml",
+            "config/configuration.toml",
+        ] {
+            let pumpkin_path = dir.join(config_name);
+            if pumpkin_path.is_file() {
+                let conf = parse_pumpkin_config(&pumpkin_path);
+                if creds.password.is_none()
+                    && let Some(pwd) = conf.get("rcon.password").filter(|s| !s.is_empty())
+                {
+                    creds.password = Some(pwd.clone());
+                }
+                if creds.port.is_none() {
+                    if let Some(port) = conf.get("rcon.port").and_then(|p| p.parse().ok()) {
+                        creds.port = Some(port);
+                    } else if let Some(addr) = conf.get("rcon.address") {
+                        creds.port = extract_port_from_address(addr);
+                    }
+                }
+                if creds.host.is_none()
+                    && let Some(addr) = conf.get("rcon.address")
+                {
+                    let trimmed = addr.trim().trim_matches('"').trim_matches('\'');
+                    if let Some((h, _)) = trimmed.split_once(':')
+                        && !h.is_empty()
+                        && h != "0.0.0.0"
+                    {
+                        creds.host = Some(h.to_string());
+                    }
+                }
+            }
+        }
+
+        if creds.password.is_some() && creds.port.is_some() {
+            break;
+        }
+    }
+
+    creds
 }
 
 fn extract_port_from_address(addr: &str) -> Option<u16> {
@@ -782,6 +954,60 @@ pub fn ansi_motd(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn parses_env_file_correctly() {
+        let temp = tempfile::tempdir().unwrap();
+        let env_path = temp.path().join(".env");
+        std::fs::write(
+            &env_path,
+            "# Comment
+RCON_PASSWORD=\"secret123\"
+RCON_PORT=25576
+",
+        )
+        .unwrap();
+        let map = super::parse_env_file(&env_path);
+        assert_eq!(
+            map.get("RCON_PASSWORD").map(String::as_str),
+            Some("secret123")
+        );
+        assert_eq!(map.get("RCON_PORT").map(String::as_str), Some("25576"));
+    }
+
+    #[test]
+    fn auto_detects_rcon_from_server_properties() {
+        let temp = tempfile::tempdir().unwrap();
+        let prop_path = temp.path().join("server.properties");
+        std::fs::write(
+            &prop_path,
+            "enable-rcon=true
+rcon.port=25577
+rcon.password=prop_pass
+",
+        )
+        .unwrap();
+        let creds = super::auto_detect_rcon(Some(temp.path()));
+        assert_eq!(creds.password.as_deref(), Some("prop_pass"));
+        assert_eq!(creds.port, Some(25577));
+    }
+
+    #[test]
+    fn auto_detects_rcon_from_pumpkin_toml() {
+        let temp = tempfile::tempdir().unwrap();
+        let toml_path = temp.path().join("pumpkin.toml");
+        std::fs::write(
+            &toml_path,
+            "[rcon]
+enabled = true
+password = \"pumpkin_secret\"
+port = 25578
+",
+        )
+        .unwrap();
+        let creds = super::auto_detect_rcon(Some(temp.path()));
+        assert_eq!(creds.password.as_deref(), Some("pumpkin_secret"));
+        assert_eq!(creds.port, Some(25578));
+    }
     use super::{ansi_motd, discover_servers_in, read_server, running_server_paths};
     use std::{collections::HashMap, net::TcpListener};
     #[test]

@@ -18,9 +18,18 @@ pub struct ChunkSlotHeader {
     pub timestamp: u32,
 }
 
+#[allow(dead_code)]
+pub const LINEAR_SIGNATURE: u64 = 0xC3FF_1318_3CCA_9D9A;
+pub const LINEAR_SIGNATURE_BYTES: [u8; 8] = [0xC3, 0xFF, 0x13, 0x18, 0x3C, 0xCA, 0x9D, 0x9A];
+pub const LINEAR_HEADER_SIZE: usize = 32;
+pub const LINEAR_FOOTER_SIZE: usize = 8;
+
 pub fn region_coordinates(path: &Path) -> Option<(i32, i32)> {
     let name = path.file_name()?.to_str()?;
-    let fields: Vec<_> = name.strip_suffix(".mca")?.split('.').collect();
+    let stem = name
+        .strip_suffix(".mca")
+        .or_else(|| name.strip_suffix(".linear"))?;
+    let fields: Vec<_> = stem.split('.').collect();
     (fields.len() == 3 && fields[0] == "r")
         .then(|| Some((fields[1].parse().ok()?, fields[2].parse().ok()?)))
         .flatten()
@@ -29,6 +38,12 @@ pub fn region_coordinates(path: &Path) -> Option<(i32, i32)> {
 pub fn read_region_header(path: &Path) -> Result<Vec<ChunkSlotHeader>> {
     let mut file =
         std::fs::File::open(path).with_context(|| format!("reading {}", path.display()))?;
+    let mut magic = [0u8; 8];
+    let n = file.read(&mut magic)?;
+    if n >= 8 && magic == LINEAR_SIGNATURE_BYTES {
+        return read_linear_header(path);
+    }
+    file.seek(SeekFrom::Start(0))?;
     let mut header = [0u8; SECTOR * 2];
     file.read_exact(&mut header)
         .with_context(|| format!("reading header from {}", path.display()))?;
@@ -54,6 +69,87 @@ pub fn read_region_header(path: &Path) -> Result<Vec<ChunkSlotHeader>> {
     Ok(slots)
 }
 
+fn read_linear_header(path: &Path) -> Result<Vec<ChunkSlotHeader>> {
+    let mut file =
+        std::fs::File::open(path).with_context(|| format!("reading {}", path.display()))?;
+    file.seek(SeekFrom::Start(LINEAR_HEADER_SIZE as u64))?;
+    let mut decoder =
+        zstd::Decoder::new(file).context("initializing zstd decoder for linear file header")?;
+    let mut table = [0u8; 8192];
+    decoder
+        .read_exact(&mut table)
+        .context("reading 8192-byte chunk table from linear stream")?;
+
+    let mut slots = Vec::with_capacity(1024);
+    for slot in 0..1024 {
+        let entry = slot * 8;
+        let chunk_size = u32::from_be_bytes(table[entry..entry + 4].try_into().unwrap()) as usize;
+        let timestamp = u32::from_be_bytes(table[entry + 4..entry + 8].try_into().unwrap());
+        if chunk_size > 0 {
+            slots.push(ChunkSlotHeader {
+                slot,
+                sector_offset: chunk_size,
+                sector_count: 1,
+                timestamp,
+            });
+        }
+    }
+    Ok(slots)
+}
+
+fn read_single_chunk_linear(path: &Path, slot: usize, decompress_buf: &mut Vec<u8>) -> Result<()> {
+    if slot >= 1024 {
+        bail!("chunk slot {slot} out of bounds (max 1023)");
+    }
+    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    if bytes.len() < LINEAR_HEADER_SIZE + LINEAR_FOOTER_SIZE {
+        bail!("linear region file is shorter than 40 bytes");
+    }
+    let compressed_len = u32::from_be_bytes(bytes[20..24].try_into().unwrap()) as usize;
+    let payload_end = if compressed_len > 0 && LINEAR_HEADER_SIZE + compressed_len <= bytes.len() {
+        LINEAR_HEADER_SIZE + compressed_len
+    } else {
+        bytes.len().saturating_sub(LINEAR_FOOTER_SIZE)
+    };
+    if payload_end <= LINEAR_HEADER_SIZE {
+        bail!("empty linear compressed payload");
+    }
+    let compressed_slice = &bytes[LINEAR_HEADER_SIZE..payload_end];
+
+    let mut decompressed = Vec::new();
+    let mut decoder = zstd::Decoder::new(compressed_slice)
+        .context("initializing zstd decoder for linear file")?;
+    decoder
+        .read_to_end(&mut decompressed)
+        .context("decompressing zstd stream for linear file")?;
+
+    if decompressed.len() < 8192 {
+        bail!("decompressed linear stream too short for chunk table");
+    }
+
+    let mut payload_offset = 8192;
+    for s in 0..1024 {
+        let entry = s * 8;
+        let chunk_size =
+            u32::from_be_bytes(decompressed[entry..entry + 4].try_into().unwrap()) as usize;
+        if s == slot {
+            if chunk_size == 0 {
+                bail!("chunk at slot {slot} is not generated");
+            }
+            if payload_offset + chunk_size > decompressed.len() {
+                bail!("chunk payload exceeds decompressed linear stream");
+            }
+            decompress_buf.clear();
+            decompress_buf
+                .extend_from_slice(&decompressed[payload_offset..payload_offset + chunk_size]);
+            return Ok(());
+        }
+        payload_offset += chunk_size;
+    }
+
+    bail!("chunk at slot {slot} not found")
+}
+
 pub fn read_single_chunk(
     path: &Path,
     slot: usize,
@@ -62,6 +158,16 @@ pub fn read_single_chunk(
     decompress_buf: &mut Vec<u8>,
     decompressor: &mut libdeflater::Decompressor,
 ) -> Result<()> {
+    let mut magic = [0u8; 8];
+    {
+        let mut file =
+            std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
+        let _ = file.read(&mut magic);
+    }
+    if magic == LINEAR_SIGNATURE_BYTES {
+        return read_single_chunk_linear(path, slot, decompress_buf);
+    }
+
     let mut file =
         std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let location = sector_offset
@@ -162,6 +268,11 @@ where
     file.read_to_end(file_buf)
         .with_context(|| format!("reading {}", path.display()))?;
     let bytes = file_buf.as_slice();
+
+    if bytes.len() >= 8 && bytes[..8] == LINEAR_SIGNATURE_BYTES {
+        return for_each_chunk_linear(bytes, decompress_buf, callback);
+    }
+
     if bytes.len() < SECTOR * 2 {
         bail!("region header is shorter than 8192 bytes");
     }
@@ -261,6 +372,84 @@ where
             }
         }
     }
+    Ok(())
+}
+
+fn for_each_chunk_linear<F>(
+    bytes: &[u8],
+    decompress_buf: &mut Vec<u8>,
+    mut callback: F,
+) -> Result<()>
+where
+    F: FnMut(usize, Result<&[u8]>),
+{
+    if bytes.len() < LINEAR_HEADER_SIZE + LINEAR_FOOTER_SIZE {
+        bail!("linear region file is shorter than 40 bytes");
+    }
+    if bytes[..8] != LINEAR_SIGNATURE_BYTES {
+        bail!("invalid linear signature at header");
+    }
+    let version = bytes[8];
+    if version != 1 && version != 2 {
+        bail!("unsupported linear format version: {version}");
+    }
+    let compressed_len = u32::from_be_bytes(bytes[20..24].try_into().unwrap()) as usize;
+    let payload_end = if compressed_len > 0 && LINEAR_HEADER_SIZE + compressed_len <= bytes.len() {
+        LINEAR_HEADER_SIZE + compressed_len
+    } else {
+        bytes.len().saturating_sub(LINEAR_FOOTER_SIZE)
+    };
+    if payload_end <= LINEAR_HEADER_SIZE {
+        bail!("empty linear compressed payload");
+    }
+    let compressed_slice = &bytes[LINEAR_HEADER_SIZE..payload_end];
+
+    decompress_buf.clear();
+    let mut decoder = zstd::Decoder::new(compressed_slice)
+        .context("initializing zstd decoder for linear file")?;
+    decoder
+        .read_to_end(decompress_buf)
+        .context("decompressing zstd stream for linear file")?;
+
+    let decompressed = decompress_buf.as_slice();
+    if decompressed.len() < 8192 {
+        bail!("decompressed linear stream is smaller than 8192-byte chunk table");
+    }
+
+    let mut payload_offset = 8192;
+    for slot in 0..1024 {
+        let entry_offset = slot * 8;
+        let chunk_size = u32::from_be_bytes(
+            decompressed[entry_offset..entry_offset + 4]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        let _timestamp = u32::from_be_bytes(
+            decompressed[entry_offset + 4..entry_offset + 8]
+                .try_into()
+                .unwrap(),
+        );
+
+        if chunk_size == 0 {
+            continue;
+        }
+
+        if payload_offset + chunk_size > decompressed.len() {
+            callback(
+                slot,
+                Err(anyhow!(
+                    "chunk {slot} payload of size {chunk_size} exceeds decompressed stream length {}",
+                    decompressed.len()
+                )),
+            );
+            break;
+        }
+
+        let chunk_slice = &decompressed[payload_offset..payload_offset + chunk_size];
+        callback(slot, Ok(chunk_slice));
+        payload_offset += chunk_size;
+    }
+
     Ok(())
 }
 
@@ -410,12 +599,97 @@ mod tests {
     use super::{
         ChunkSlotHeader, decompress, read_region_header, read_single_chunk, region_coordinates,
     };
+    use super::{LINEAR_SIGNATURE_BYTES, for_each_chunk};
     use flate2::{
         Compression,
         write::{GzEncoder, ZlibEncoder},
     };
     use std::io::Write;
     use std::path::Path;
+
+    #[test]
+    fn parses_linear_region_coordinates() {
+        assert_eq!(
+            region_coordinates(Path::new("r.-5.12.linear")),
+            Some((-5, 12))
+        );
+        assert_eq!(region_coordinates(Path::new("bad.linear")), None);
+    }
+
+    #[test]
+    fn parses_linear_region_file() {
+        let mut uncompressed = Vec::with_capacity(8192 + 100);
+        let mut table = [0u8; 8192];
+        let chunk0_data = b"hello chunk 0 nbt payload";
+        let chunk5_data = b"world chunk 5 nbt payload";
+
+        // slot 0
+        table[0..4].copy_from_slice(&(chunk0_data.len() as u32).to_be_bytes());
+        table[4..8].copy_from_slice(&1000u32.to_be_bytes());
+
+        // slot 5
+        let off5 = 5 * 8;
+        table[off5..off5 + 4].copy_from_slice(&(chunk5_data.len() as u32).to_be_bytes());
+        table[off5 + 4..off5 + 8].copy_from_slice(&2000u32.to_be_bytes());
+
+        uncompressed.extend_from_slice(&table);
+        uncompressed.extend_from_slice(chunk0_data);
+        uncompressed.extend_from_slice(chunk5_data);
+
+        let compressed = zstd::encode_all(&uncompressed[..], 3).unwrap();
+
+        let mut file_bytes = Vec::new();
+        // 32-byte header
+        file_bytes.extend_from_slice(&LINEAR_SIGNATURE_BYTES); // 8 bytes
+        file_bytes.push(1); // version 1
+        file_bytes.extend_from_slice(&2000u64.to_be_bytes()); // newest timestamp (8 bytes)
+        file_bytes.push(3); // compression level (1 byte)
+        file_bytes.extend_from_slice(&2u16.to_be_bytes()); // chunk count (2 bytes)
+        file_bytes.extend_from_slice(&(compressed.len() as u32).to_be_bytes()); // data length (4 bytes)
+        file_bytes.extend_from_slice(&[0u8; 8]); // reserved (8 bytes)
+        assert_eq!(file_bytes.len(), 32);
+
+        // payload
+        file_bytes.extend_from_slice(&compressed);
+
+        // 8-byte footer
+        file_bytes.extend_from_slice(&LINEAR_SIGNATURE_BYTES);
+
+        let temp = tempfile::tempdir().unwrap();
+        let linear_path = temp.path().join("r.0.0.linear");
+        std::fs::write(&linear_path, &file_bytes).unwrap();
+
+        // 1. Test read_region_header
+        let headers = read_region_header(&linear_path).unwrap();
+        assert_eq!(headers.len(), 2);
+        assert_eq!(headers[0].slot, 0);
+        assert_eq!(headers[0].timestamp, 1000);
+        assert_eq!(headers[1].slot, 5);
+        assert_eq!(headers[1].timestamp, 2000);
+
+        // 2. Test for_each_chunk
+        let mut chunks_read = Vec::new();
+        let mut decompress_buf = Vec::new();
+        for_each_chunk(&linear_path, &mut decompress_buf, |slot, res| {
+            chunks_read.push((slot, res.unwrap().to_vec()));
+        })
+        .unwrap();
+        assert_eq!(chunks_read.len(), 2);
+        assert_eq!(chunks_read[0].0, 0);
+        assert_eq!(chunks_read[0].1, chunk0_data);
+        assert_eq!(chunks_read[1].0, 5);
+        assert_eq!(chunks_read[1].1, chunk5_data);
+
+        // 3. Test read_single_chunk
+        let mut out = Vec::new();
+        let mut decompressor = libdeflater::Decompressor::new();
+        read_single_chunk(&linear_path, 0, 0, 0, &mut out, &mut decompressor).unwrap();
+        assert_eq!(out, chunk0_data);
+
+        read_single_chunk(&linear_path, 5, 0, 0, &mut out, &mut decompressor).unwrap();
+        assert_eq!(out, chunk5_data);
+    }
+
     #[test]
     fn parses_region_coordinates() {
         assert_eq!(

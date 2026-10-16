@@ -126,7 +126,7 @@ pub fn scan_world(world: &Path, options: ScanOptions) -> Result<ScanResult> {
     let regions = find_regions(&world.join("region"))?;
     if regions.is_empty() {
         anyhow::bail!(
-            "no .mca files found under {}",
+            "no .mca or .linear files found under {}",
             world.join("region").display()
         );
     }
@@ -136,11 +136,29 @@ pub fn scan_world(world: &Path, options: ScanOptions) -> Result<ScanResult> {
     let mut pairs: BTreeMap<_, Vec<(PathBuf, bool)>> = BTreeMap::new();
     for (files, entities_only) in [(regions, false), (entity_files, true)] {
         for path in files {
-            pairs
-                .entry(path.file_name().unwrap().to_owned())
-                .or_default()
-                .push((path, entities_only));
+            if let Some(coords) = region::region_coordinates(&path) {
+                pairs.entry(coords).or_default().push((path, entities_only));
+            }
         }
+    }
+    for list in pairs.values_mut() {
+        let mut seen_chunk_data = false;
+        let mut seen_entity_data = false;
+        list.retain(|(_, entities_only)| {
+            if *entities_only {
+                if seen_entity_data {
+                    false
+                } else {
+                    seen_entity_data = true;
+                    true
+                }
+            } else if seen_chunk_data {
+                false
+            } else {
+                seen_chunk_data = true;
+                true
+            }
+        });
     }
     let num_cpus = std::thread::available_parallelism().map_or(1, |n| n.get());
     let requested = options.threads.unwrap_or_else(|| {
@@ -254,9 +272,24 @@ fn find_regions(directory: &Path) -> Result<Vec<PathBuf>> {
     }
     let mut paths = std::fs::read_dir(directory)?
         .filter_map(|entry| entry.ok().map(|e| e.path()))
-        .filter(|path| path.extension().is_some_and(|ext| ext == "mca"))
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|ext| ext == "mca" || ext == "linear")
+        })
         .collect::<Vec<_>>();
-    paths.sort();
+    paths.sort_by(|a, b| {
+        let a_ext = a.extension().unwrap_or_default();
+        let b_ext = b.extension().unwrap_or_default();
+        if a_ext != b_ext {
+            if a_ext == "linear" {
+                return std::cmp::Ordering::Less;
+            }
+            if b_ext == "linear" {
+                return std::cmp::Ordering::Greater;
+            }
+        }
+        a.cmp(b)
+    });
     Ok(paths)
 }
 
@@ -464,6 +497,49 @@ pub fn detect_clusters(chunks: &[ChunkMetrics], threshold: f64) -> Vec<Cluster> 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn scans_a_world_with_linear_region() {
+        let temp = tempfile::tempdir().unwrap();
+        let region_dir = temp.path().join("region");
+        std::fs::create_dir_all(&region_dir).unwrap();
+
+        // Create a valid NBT chunk
+        let nbt = fastnbt::to_bytes(&serde_json::json!({
+            "DataVersion": 3700,
+            "xPos": 0,
+            "zPos": 0,
+            "Entities": [{"id": "minecraft:villager"}],
+            "block_entities": [{"id": "minecraft:hopper"}]
+        }))
+        .expect("serialize nbt");
+
+        let mut uncompressed = Vec::with_capacity(8192 + nbt.len());
+        let mut table = [0u8; 8192];
+        table[0..4].copy_from_slice(&(nbt.len() as u32).to_be_bytes());
+        table[4..8].copy_from_slice(&12345u32.to_be_bytes());
+        uncompressed.extend_from_slice(&table);
+        uncompressed.extend_from_slice(&nbt);
+
+        let compressed = zstd::encode_all(&uncompressed[..], 3).unwrap();
+        let mut file_bytes = Vec::new();
+        file_bytes.extend_from_slice(&crate::region::LINEAR_SIGNATURE_BYTES);
+        file_bytes.push(1);
+        file_bytes.extend_from_slice(&12345u64.to_be_bytes());
+        file_bytes.push(3);
+        file_bytes.extend_from_slice(&1u16.to_be_bytes());
+        file_bytes.extend_from_slice(&(compressed.len() as u32).to_be_bytes());
+        file_bytes.extend_from_slice(&[0u8; 8]);
+        file_bytes.extend_from_slice(&compressed);
+        file_bytes.extend_from_slice(&crate::region::LINEAR_SIGNATURE_BYTES);
+
+        std::fs::write(region_dir.join("r.0.0.linear"), &file_bytes).unwrap();
+
+        let res = scan_world(temp.path(), ScanOptions::new(Some(1), false, false, 0.0)).unwrap();
+        assert_eq!(res.total_scanned, 1);
+        assert_eq!(res.chunks.len(), 1);
+        assert_eq!(res.chunks[0].villagers, 1);
+        assert_eq!(res.chunks[0].hoppers, 1);
+    }
     use super::*;
     use flate2::{Compression, write::ZlibEncoder};
     use serde_json::json;
