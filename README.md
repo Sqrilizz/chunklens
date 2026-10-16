@@ -17,9 +17,11 @@ It scans `.mca` and `.linear` files at NVMe speed, surfaces root-cause culprits 
 * **Low-overhead decompression:** SIMD-accelerated decompression via `libdeflater` for zlib/deflate and `zstd` for Linear regions with minimal allocations.
 * **Zero-config RCON & discovery:** Automatically detects RCON passwords and ports from local `.env`, `server.properties`, and `pumpkin.toml` when inside a server folder.
 * **Dual-pane TUI:** Master-detail split screen (lazygit/btop style) — see all top offenders on the left, instant deep diagnosis and one-key commands on the right.
-* **Smart chunk diagnostics:** Automatic heuristic tags (`[VILLAGER]`, `[HOPPERS]`, `[REDSTONE]`, `[NBT-STASH]`, `[MOB-FARM]`) with clear severity levels.
+* **Topographic Minimap Radar:** 9×9 ASCII density radar (`m` toggle) showing surrounding chunk load and relative player proximity.
+* **Interactive RCON Actions:** Live confirmation modal (`x`/`p`) to execute targeted entity purges directly via RCON or copy commands safely.
+* **Server Config Doctor:** Automated audits of `server.properties`, `paper.yml`, and `purpur.yml` flagging unoptimized simulation distance, hopper events, and redstone engines.
+* **Lag Sentinel & Webhooks:** Real-time TPS/MSPT monitoring daemon (`chunklens live`) with Discord alert webhooks on sudden performance spikes.
 * **Spark profiler correlation:** Ingests Spark `.json` and binary `.pb` dumps to correlate offline world hotspots with live thread MSPT (`EntityTickList.forEach`, etc.).
-* **Live RCON & SLP:** Live server ping watcher with latency history, online player monitoring, and interactive remote console.
 * **Memory safe:** Bounded report decoding to prevent OOM on massive multi-gigabyte worlds.
 
 ---
@@ -28,7 +30,7 @@ It scans `.mca` and `.linear` files at NVMe speed, surfaces root-cause culprits 
 
 ### Pre-built Binaries
 
-Download pre-compiled standalone binaries for Linux, macOS, and Windows from [GitHub Releases](https://github.com/Sqrilizz/chunklens/releases).
+Download pre-compiled standalone binaries for Linux (`glibc` and static `musl`), macOS, and Windows from [GitHub Releases](https://github.com/Sqrilizz/chunklens/releases).
 
 ### From Source
 
@@ -70,6 +72,26 @@ chunklens scan /path/to/world --bloat -n 20
 chunklens scan /path/to/world --sort villagers -n 15
 ```
 
+### Server Configuration Doctor
+
+Audit server settings and flags for known performance bottlenecks:
+
+```bash
+# Audit the current server directory
+chunklens doctor
+
+# Audit a specific server path
+chunklens doctor /srv/minecraft/paper-survival
+```
+
+Inspects `server.properties`, `paper.yml` / `paper-world-defaults.yml`, and `purpur.yml` for:
+* Simulation & View distances (>6 and >10)
+* Synchronous chunk writes (`sync-chunk-writes`)
+* Aggressive packet compression thresholds
+* Hopper `disable-move-event` overhead
+* Redstone engine implementations (`alternate-current`)
+* Villager brain ticking and lobotomization settings
+
 ### Emergency Triage TUI (Master-Detail)
 
 Launch the dashboard on a world folder or saved report:
@@ -88,7 +110,18 @@ chunklens tui report.json.gz --host play.example.com:25565 --rcon play.example.c
 chunklens tui report.json.gz --spark spark-report.json
 ```
 
-### Remote Operations & Monitoring
+### Real-time Lag Sentinel & Alerting
+
+Monitor a live server's TPS/MSPT via RCON with automatic webhook alerts on performance drops:
+
+```bash
+# Sentinel monitor with Discord webhook alerting on lag spikes
+chunklens live 127.0.0.1:25575 -p secret \
+  --mspt-spike 60.0 \
+  --webhook "https://discord.com/api/webhooks/1234/abcd..."
+```
+
+### Remote Operations & CLI Utilities
 
 ```bash
 # Ping a live server via SLP (Server List Ping)
@@ -118,8 +151,9 @@ chunklens spark spark-profile.json
 | `PgUp` / `PgDn` | Scroll table page |
 | `f` | Cycle category filter (`All` → `Villagers & Mobs` → `Hoppers` → `Redstone` → `NBT & Storage`) |
 | `/` | Instant text search (coordinates, dimension, score) |
+| `m` | Toggle Topographic 2D Minimap Radar in the inspector panel |
 | `y` / `c` | Copy `/tp @s X ~ Z` teleport command to clipboard |
-| `x` / `p` | Copy targeted `/kill` purge command for selected chunk |
+| `x` / `p` | Open live RCON purge modal (executes `/kill` on confirmation or copies command) |
 | `Enter` / `d` | Open full fullscreen chunk inspector |
 | `h` | Open 2D potential load heatmap |
 | `s` | Open Spark profile analysis tab |

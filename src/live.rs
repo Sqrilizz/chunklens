@@ -29,6 +29,7 @@ pub struct LiveOptions {
     pub mspt_threshold: f64,
     pub auto_flush: bool,
     pub poll_interval_secs: u64,
+    pub webhook: Option<String>,
 }
 
 impl Default for LiveOptions {
@@ -44,6 +45,7 @@ impl Default for LiveOptions {
             mspt_threshold: 45.0,
             auto_flush: true,
             poll_interval_secs: 2,
+            webhook: None,
         }
     }
 }
@@ -635,6 +637,9 @@ impl LiveWatcher {
                     reasons,
                 });
                 Self::print_alert(&alert);
+                if let Some(url) = &self.options.webhook {
+                    send_webhook(url, &alert);
+                }
             }
 
             self.known_chunks.insert((chunk_x, chunk_z), new_metric);
@@ -813,6 +818,9 @@ impl LiveWatcher {
                                 reasons,
                             };
                             Self::print_alert(&alert);
+                            if let Some(url) = &self.options.webhook {
+                                send_webhook(url, &alert);
+                            }
                         }
 
                         previous_counts.insert((cx, cz), count);
@@ -928,6 +936,106 @@ impl LiveWatcher {
     }
 }
 
+pub fn format_discord_webhook(alert: &SpikeAlert) -> String {
+    let tp_cmd = format!("/tp @s {} ~ {}", alert.block_x, alert.block_z);
+    let kill_cmd = generate_purge_command(&alert.dimension, alert.chunk_x, alert.chunk_z, "item");
+    let perf_str = match (alert.server_mspt, alert.server_tps) {
+        (Some(mspt), Some(tps)) => format!("{mspt:.1} ms ({tps:.1} TPS)"),
+        _ => "N/A".to_string(),
+    };
+    let suspect_str = if alert.suspects.is_empty() {
+        "None within 250 blocks".to_string()
+    } else {
+        alert
+            .suspects
+            .iter()
+            .take(3)
+            .map(|(name, dist)| format!("{name} (~{dist:.0}b)"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let reasons_str = alert.reasons.join("\n• ");
+
+    let json = serde_json::json!({
+        "username": "ChunkLens Sentinel",
+        "embeds": [
+            {
+                "title": "🚨 Minecraft Lag Spike Detected",
+                "color": 15158332,
+                "fields": [
+                    {
+                        "name": "Location",
+                        "value": format!("Chunk `[{}, {}]` (Dimension: `{}`)\nBlock `~[{}, {}]`", alert.chunk_x, alert.chunk_z, alert.dimension, alert.block_x, alert.block_z),
+                        "inline": true
+                    },
+                    {
+                        "name": "Server Performance",
+                        "value": format!("MSPT: `{perf_str}`"),
+                        "inline": true
+                    },
+                    {
+                        "name": "Detected Spikes",
+                        "value": format!("• {reasons_str}"),
+                        "inline": false
+                    },
+                    {
+                        "name": "Nearby Players",
+                        "value": suspect_str,
+                        "inline": false
+                    },
+                    {
+                        "name": "Quick Fix Commands",
+                        "value": format!("Teleport: `{tp_cmd}`\nPurge items: `{kill_cmd}`"),
+                        "inline": false
+                    }
+                ],
+                "footer": {
+                    "text": format!("ChunkLens Sentinel • {}", alert.timestamp)
+                }
+            }
+        ]
+    });
+    json.to_string()
+}
+
+pub fn send_webhook(url: &str, alert: &SpikeAlert) {
+    let payload = if url.contains("telegram") {
+        let text = format!(
+            "🚨 *Minecraft Lag Spike Detected*\n\nChunk: `[{}, {}]` ({})\nMSPT: `{:?}`\nDelta: `+{:.1}`\n\nFix: `/tp @s {} ~ {}`",
+            alert.chunk_x,
+            alert.chunk_z,
+            alert.dimension,
+            alert.server_mspt,
+            alert.delta_score,
+            alert.block_x,
+            alert.block_z
+        );
+        serde_json::json!({
+            "text": text,
+            "parse_mode": "Markdown"
+        })
+        .to_string()
+    } else {
+        format_discord_webhook(alert)
+    };
+
+    let url = url.to_string();
+    std::thread::spawn(move || {
+        let _ = std::process::Command::new("curl")
+            .arg("-s")
+            .arg("-m")
+            .arg("5")
+            .arg("-X")
+            .arg("POST")
+            .arg("-H")
+            .arg("Content-Type: application/json")
+            .arg("-d")
+            .arg(&payload)
+            .arg(&url)
+            .output();
+    });
+}
+
 fn chrono_lite_time_string() -> String {
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -942,6 +1050,34 @@ fn chrono_lite_time_string() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn formats_discord_webhook_embed_correctly() {
+        let alert = SpikeAlert {
+            timestamp: "12:00:00 UTC".to_string(),
+            dimension: "overworld".to_string(),
+            chunk_x: 10,
+            chunk_z: -20,
+            block_x: 168,
+            block_z: -312,
+            old_score: 10.0,
+            new_score: 35.0,
+            delta_score: 25.0,
+            delta_entities: 50,
+            delta_villagers: 10,
+            delta_hoppers: 25,
+            delta_minecarts: 0,
+            delta_payload_kb: 200,
+            suspects: vec![("Notch".to_string(), 15.0)],
+            server_mspt: Some(48.5),
+            server_tps: Some(18.2),
+            reasons: vec!["load score jumped by +25.0".to_string()],
+        };
+        let payload = format_discord_webhook(&alert);
+        assert!(payload.contains("ChunkLens Sentinel"));
+        assert!(payload.contains("Chunk `[10, -20]`"));
+        assert!(payload.contains("48.5 ms"));
+        assert!(payload.contains("Notch (~15b)"));
+    }
 
     #[test]
     fn generates_accurate_purge_commands() {

@@ -10,6 +10,7 @@ use ratatui::{
 };
 
 use super::app::{AppState, Tab};
+use crate::model::ChunkMetrics;
 
 // Industrial Terminal Palette (inspired by lazygit & btop)
 const COLOR_PRIMARY: Color = Color::Rgb(56, 189, 248); // Cyan 400 (Active focus / highlights)
@@ -68,6 +69,10 @@ pub fn render(frame: &mut Frame, state: &mut AppState) {
 
     if state.help_visible {
         render_help(frame, size);
+    }
+
+    if state.purge_modal_open {
+        render_purge_modal(frame, state, size);
     }
 }
 
@@ -528,16 +533,31 @@ fn render_instant_inspector(frame: &mut Frame, state: &AppState, area: Rect) {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        let layout = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(2), // Location & Score Meta
-                Constraint::Length(2), // Diagnosis Banner
-                Constraint::Min(6),    // Entity & Block Breakdown
-                Constraint::Length(2), // Spark Correlation
-                Constraint::Length(1), // Actions Strip
-            ])
-            .split(inner);
+        let show_radar = state.show_minimap && inner.height >= 20;
+        let layout = if show_radar {
+            Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(2), // Location & Score Meta
+                    Constraint::Length(2), // Diagnosis Banner
+                    Constraint::Length(7), // Entity & Block Breakdown
+                    Constraint::Length(2), // Spark Correlation
+                    Constraint::Min(5),    // Topographic Radar
+                    Constraint::Length(1), // Actions Strip
+                ])
+                .split(inner)
+        } else {
+            Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(2), // Location & Score Meta
+                    Constraint::Length(2), // Diagnosis Banner
+                    Constraint::Min(6),    // Entity & Block Breakdown
+                    Constraint::Length(2), // Spark Correlation
+                    Constraint::Length(1), // Actions Strip
+                ])
+                .split(inner)
+        };
 
         // 1. Location & Meta
         let meta_line = Line::from(vec![
@@ -697,6 +717,18 @@ fn render_instant_inspector(frame: &mut Frame, state: &AppState, area: Rect) {
         };
         frame.render_widget(Paragraph::new(spark_text), layout[3]);
 
+        let action_purge_label = if state.rcon_addr.is_some() {
+            "RCON Purge  │ "
+        } else {
+            "Copy /kill  │ "
+        };
+
+        if show_radar {
+            render_minimap_radar(frame, state, c, layout[4]);
+        }
+
+        let action_idx = if show_radar { 5 } else { 4 };
+
         // 5. Actions Strip
         let actions = Line::from(vec![
             Span::styled("Actions: ", Style::default().fg(COLOR_MUTED)),
@@ -713,16 +745,23 @@ fn render_instant_inspector(frame: &mut Frame, state: &AppState, area: Rect) {
                     .fg(COLOR_DANGER)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("Copy /kill  │ ", Style::default().fg(COLOR_MUTED)),
+            Span::styled(action_purge_label, Style::default().fg(COLOR_MUTED)),
+            Span::styled(
+                "[m] ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("Radar  │ ", Style::default().fg(COLOR_MUTED)),
             Span::styled(
                 "[Enter] ",
                 Style::default()
                     .fg(COLOR_ACCENT)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("Fullscreen Inspector", Style::default().fg(COLOR_MUTED)),
+            Span::styled("Inspector", Style::default().fg(COLOR_MUTED)),
         ]);
-        frame.render_widget(Paragraph::new(actions), layout[4]);
+        frame.render_widget(Paragraph::new(actions), layout[action_idx]);
     } else {
         frame.render_widget(
             Paragraph::new("No chunk selected")
@@ -731,6 +770,198 @@ fn render_instant_inspector(frame: &mut Frame, state: &AppState, area: Rect) {
             area,
         );
     }
+}
+
+fn render_minimap_radar(frame: &mut Frame, state: &AppState, c: &ChunkMetrics, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(COLOR_BORDER))
+        .title(Span::styled(
+            " Topographic Radar (Surrounding Chunks) ",
+            Style::default()
+                .fg(COLOR_PRIMARY)
+                .add_modifier(Modifier::BOLD),
+        ));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.height < 3 || inner.width < 15 {
+        return;
+    }
+
+    let rows_radius = ((inner.height.saturating_sub(1) / 2) as i32).clamp(1, 2);
+    let cols_radius = ((inner.width.saturating_sub(2) / 6) as i32).clamp(2, 5);
+
+    let mut lines = Vec::new();
+    for dz in -rows_radius..=rows_radius {
+        let mut spans = Vec::new();
+        for dx in -cols_radius..=cols_radius {
+            let tx = c.chunk_x + dx;
+            let tz = c.chunk_z + dz;
+
+            if dx == 0 && dz == 0 {
+                spans.push(Span::styled(
+                    " [★]",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            } else {
+                let score = state.chunk_score_at(tx, tz);
+                let (sym, style) = match score {
+                    Some(s) if s >= 80.0 => ("  █ ", Style::default().fg(COLOR_DANGER)),
+                    Some(s) if s >= 50.0 => ("  ▓ ", Style::default().fg(COLOR_WARNING)),
+                    Some(s) if s >= 20.0 => ("  ▒ ", Style::default().fg(Color::Rgb(245, 158, 11))),
+                    Some(s) if s >= 5.0 => ("  ░ ", Style::default().fg(Color::Rgb(56, 189, 248))),
+                    _ => ("  · ", Style::default().fg(COLOR_BORDER)),
+                };
+                spans.push(Span::styled(sym, style));
+            }
+        }
+        lines.push(Line::from(spans));
+    }
+
+    let legend = Line::from(vec![
+        Span::styled(
+            "★ Target  ",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("█ 80+  ", Style::default().fg(COLOR_DANGER)),
+        Span::styled("▓ 50+  ", Style::default().fg(COLOR_WARNING)),
+        Span::styled("▒ 20+  ", Style::default().fg(Color::Rgb(245, 158, 11))),
+        Span::styled("░ 5+  ", Style::default().fg(Color::Rgb(56, 189, 248))),
+        Span::styled("· Light", Style::default().fg(COLOR_BORDER)),
+    ]);
+    lines.push(legend);
+
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+fn render_purge_modal(frame: &mut Frame, state: &AppState, area: Rect) {
+    let width = 64.min(area.width.saturating_sub(4));
+    let height = 11.min(area.height.saturating_sub(4));
+    let x = (area.width.saturating_sub(width)) / 2;
+    let y = (area.height.saturating_sub(height)) / 2;
+    let modal_area = Rect::new(x, y, width, height);
+
+    frame.render_widget(Clear, modal_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(COLOR_DANGER))
+        .title(Span::styled(
+            " 🚨 Live RCON Action: Purge Offending Entities ",
+            Style::default()
+                .fg(COLOR_DANGER)
+                .add_modifier(Modifier::BOLD),
+        ));
+
+    let inner = block.inner(modal_area);
+    frame.render_widget(block, modal_area);
+
+    let chunk = state.selected_chunk();
+    let (coord_str, dim_str, score_str, cmd_str) = match chunk {
+        Some(c) => {
+            let entity_type = if c.villagers > 15 {
+                "villager"
+            } else if c.dropped_items > 30 {
+                "item"
+            } else {
+                "all"
+            };
+            (
+                format!("[{}, {}]", c.chunk_x, c.chunk_z),
+                c.dimension.clone(),
+                format!("{:.1}", c.score),
+                crate::live::generate_purge_command(
+                    &c.dimension,
+                    c.chunk_x,
+                    c.chunk_z,
+                    entity_type,
+                ),
+            )
+        }
+        None => (
+            "N/A".to_string(),
+            "unknown".to_string(),
+            "0.0".to_string(),
+            "N/A".to_string(),
+        ),
+    };
+
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("Target Chunk: ", Style::default().fg(COLOR_MUTED)),
+            Span::styled(
+                coord_str,
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  ({dim_str}) • Score: "),
+                Style::default().fg(COLOR_MUTED),
+            ),
+            Span::styled(
+                score_str,
+                Style::default()
+                    .fg(COLOR_DANGER)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Remote Server: ", Style::default().fg(COLOR_MUTED)),
+            Span::styled(
+                state
+                    .rcon_addr
+                    .map_or("None".to_string(), |a| a.to_string()),
+                Style::default().fg(Color::Green),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Command: ", Style::default().fg(COLOR_MUTED)),
+            Span::styled(
+                format!("/{cmd_str}"),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled(
+                " [y / Enter] ",
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Red)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" Execute via RCON   ", Style::default().fg(Color::White)),
+            Span::styled(
+                " [c] ",
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" Copy Command   ", Style::default().fg(Color::White)),
+            Span::styled(
+                " [Esc] ",
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" Cancel", Style::default().fg(Color::White)),
+        ]),
+    ];
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 fn render_offenders_compact(

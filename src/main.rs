@@ -1,5 +1,6 @@
 mod analysis;
 mod discovery;
+pub mod doctor;
 pub mod live;
 mod model;
 mod nbt;
@@ -202,6 +203,14 @@ enum Command {
         /// Disable automatic '/save-all flush' via RCON on MSPT spikes
         #[arg(long)]
         no_flush: bool,
+        /// Discord or Telegram webhook URL to notify on lag spikes
+        #[arg(long)]
+        webhook: Option<String>,
+    },
+    /// Audit server configuration files and provide actionable optimization advice
+    Doctor {
+        /// Server folder path to audit (defaults to current directory)
+        path: Option<PathBuf>,
     },
 }
 
@@ -408,6 +417,11 @@ fn main() -> Result<()> {
                 }
             }
             Command::Servers => interactive_discovery()?,
+            Command::Doctor { path } => {
+                let target = path.unwrap_or_else(|| PathBuf::from("."));
+                let report = doctor::diagnose_server(&target)?;
+                doctor::print_doctor_report(&report);
+            }
             Command::Live {
                 world,
                 rcon,
@@ -418,6 +432,7 @@ fn main() -> Result<()> {
                 spike_payload_kb,
                 mspt_threshold,
                 no_flush,
+                webhook,
             } => {
                 let target_world = if world.is_none() && rcon.is_some() {
                     match resolve_world_path(world) {
@@ -461,6 +476,7 @@ fn main() -> Result<()> {
                     mspt_threshold,
                     auto_flush: !no_flush,
                     poll_interval_secs: 2,
+                    webhook,
                 };
                 let mut watcher = live::LiveWatcher::new(options);
                 watcher.run()?;
@@ -559,6 +575,9 @@ fn print_quick_help() {
     println!("    \x1b[96mchunklens tui\x1b[0m              Interactive fullscreen TUI dashboard");
     println!(
         "    \x1b[96mchunklens ping <addr>\x1b[0m      Ping server via SLP (e.g. \x1b[90mchunklens ping localhost\x1b[0m)"
+    );
+    println!(
+        "    \x1b[96mchunklens doctor [DIR]\x1b[0m     Audit server configs & performance recommendations"
     );
     println!("    \x1b[96mchunklens spark <file>\x1b[0m     Analyze a Spark profile report");
     println!("    \x1b[96mchunklens servers\x1b[0m          Discover local Minecraft servers");

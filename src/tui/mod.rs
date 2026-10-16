@@ -88,6 +88,24 @@ fn handle_key(state: &mut AppState, code: KeyCode, modifiers: KeyModifiers) {
         return;
     }
 
+    // Modal Purge Confirmation Input
+    if state.purge_modal_open {
+        match code {
+            KeyCode::Enter | KeyCode::Char('y' | 'Y') => {
+                state.execute_modal_purge();
+            }
+            KeyCode::Char('c' | 'C') => {
+                state.copy_purge_command();
+                state.close_purge_modal();
+            }
+            KeyCode::Esc | KeyCode::Char('q' | 'Q' | 'n' | 'N') => {
+                state.close_purge_modal();
+            }
+            _ => {}
+        }
+        return;
+    }
+
     // Modal Search Filter Input
     if state.is_searching {
         match code {
@@ -211,7 +229,15 @@ fn handle_key(state: &mut AppState, code: KeyCode, modifiers: KeyModifiers) {
         }
 
         KeyCode::Char('x' | 'X' | 'p' | 'P') if state.active_tab == Tab::Hotspots => {
-            state.copy_purge_command();
+            if state.rcon_addr.is_some() {
+                state.open_purge_modal();
+            } else {
+                state.copy_purge_command();
+            }
+        }
+
+        KeyCode::Char('m' | 'M') => {
+            state.toggle_minimap();
         }
 
         KeyCode::Char('f' | 'F') if state.active_tab == Tab::Hotspots => {

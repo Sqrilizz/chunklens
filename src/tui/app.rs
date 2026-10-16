@@ -129,6 +129,8 @@ pub struct AppState {
     pub rcon_input: String,
     pub rcon_history: Vec<String>,
     pub rcon_logs: Vec<(String, String, bool)>, // (time, text, is_command)
+    pub purge_modal_open: bool,
+    pub show_minimap: bool,
 }
 
 impl AppState {
@@ -165,6 +167,8 @@ impl AppState {
         };
 
         // Resolve socket address for server monitor
+        let purge_modal_open = false;
+        let show_minimap = true;
         let (background_tx, background_rx) = mpsc::channel();
         let spatial_index = scan
             .chunks
@@ -221,6 +225,8 @@ impl AppState {
             rcon_input: String::new(),
             rcon_history: Vec::new(),
             rcon_logs: Vec::new(),
+            purge_modal_open,
+            show_minimap,
         }
     }
 
@@ -571,6 +577,73 @@ impl AppState {
             let _ = std::io::stdout().flush();
             self.notify(format!("Copied /kill command: {command}"));
         }
+    }
+
+    pub fn open_purge_modal(&mut self) {
+        if self.selected_chunk().is_some() {
+            self.purge_modal_open = true;
+        }
+    }
+
+    pub fn close_purge_modal(&mut self) {
+        self.purge_modal_open = false;
+    }
+
+    pub fn toggle_minimap(&mut self) {
+        self.show_minimap = !self.show_minimap;
+        let state_str = if self.show_minimap {
+            "visible"
+        } else {
+            "hidden"
+        };
+        self.notify(format!("Minimap radar: {state_str}"));
+    }
+
+    pub fn execute_modal_purge(&mut self) {
+        self.purge_modal_open = false;
+        let Some(c) = self.selected_chunk().cloned() else {
+            return;
+        };
+        if self.rcon_addr.is_none() {
+            self.copy_purge_command();
+            return;
+        }
+        let entity_type = if c.villagers > 15 {
+            "villager"
+        } else if c.dropped_items > 30 {
+            "item"
+        } else {
+            "all"
+        };
+        let command =
+            crate::live::generate_purge_command(&c.dimension, c.chunk_x, c.chunk_z, entity_type);
+        self.send_rcon_direct(&command);
+        self.notify(format!("Executing RCON: /{command}"));
+    }
+
+    pub fn send_rcon_direct(&mut self, cmd: &str) {
+        let Some(addr) = self.rcon_addr else {
+            return;
+        };
+        let pwd = self.rcon_password.clone().unwrap_or_default();
+        let tx = self.background_tx.clone();
+        let command = cmd.to_string();
+        self.rcon_pending = true;
+        std::thread::spawn(move || {
+            let result = (|| -> Result<String, String> {
+                let mut client =
+                    crate::protocol::rcon::RconClient::connect(addr, &pwd, Duration::from_secs(4))
+                        .map_err(|e| e.to_string())?;
+                client.execute(&command).map_err(|e| e.to_string())
+            })();
+            let _ = tx.send(BackgroundEvent::Rcon(result));
+        });
+    }
+
+    pub fn chunk_score_at(&self, x: i32, z: i32) -> Option<f64> {
+        self.spatial_index
+            .get(&(x, z))
+            .and_then(|&idx| self.scan.chunks.get(idx).map(|c| c.score))
     }
 
     pub fn notify(&mut self, msg: String) {
