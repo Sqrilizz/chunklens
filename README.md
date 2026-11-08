@@ -157,7 +157,7 @@ chunklens spark spark-profile.json
 | `Enter` / `d` | Open full fullscreen chunk inspector |
 | `h` | Open 2D potential load heatmap |
 | `s` | Open Spark profile analysis tab |
-| `r` | Refresh live server status & ping |
+| `r` | Refresh live server status & ping |.
 | `?` | Toggle help popup |
 | `Esc` / `q` | Back / Quit |
 
